@@ -1,0 +1,55 @@
+name: Orihost Auto Renew
+
+on:
+  schedule:
+    # 每 3 天一次，UTC 10:00 = 北京时间 18:00
+    - cron: '0 10 */3 * *'
+  workflow_dispatch:  # 支持手动触发
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install requests
+
+      - name: ⚙ 设置代理 (sing-box)
+        continue-on-error: true
+        env:
+          NODE_LINK: ${{ secrets.NODE_LINK }}
+        run: |
+          bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
+
+      - name: Run Orihost Renew
+        env:
+          # 单账号（向下兼容）
+          ORIHOST_COOKIE: ${{ secrets.ORIHOST_COOKIE }}
+          ORIHOST_SERVER_IDS: ${{ vars.ORIHOST_SERVER_IDS }}
+
+          # 多账号 1
+          ORIHOST_COOKIE_1: ${{ secrets.ORIHOST_COOKIE_1 }}
+          ORIHOST_SERVER_IDS_1: ${{ vars.ORIHOST_SERVER_IDS_1 }}
+          # 多账号 2
+          ORIHOST_COOKIE_2: ${{ secrets.ORIHOST_COOKIE_2 }}
+          ORIHOST_SERVER_IDS_2: ${{ vars.ORIHOST_SERVER_IDS_2 }}
+          # 多账号 3（按需继续添加）
+          ORIHOST_COOKIE_3: ${{ secrets.ORIHOST_COOKIE_3 }}
+          ORIHOST_SERVER_IDS_3: ${{ vars.ORIHOST_SERVER_IDS_3 }}
+
+          # 通用配置
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+
+          # 代理（由 setup_proxy.sh 启动 sing-box 后自动使用）
+          ORIHOST_PROXY: http://127.0.0.1:1081
+        run: python orihost-renew.py

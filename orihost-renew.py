@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-#  -*- coding: utf-8 -*-
-# ============================================================
-# 模板名称：Orihost 免费服务器续期脚本
-# 描述：通过 Jexactyl 面板 Cookie 直调续期接口
-#       支持多账号多服务器
-# 归类：Jexactyl/Pterodactyl 续期类型
-# 仓库: https://github.com/jacksun-king/orihost-renew
+# -*- coding: utf-8 -*-
 # ============================================================
 import os
 import sys
@@ -19,26 +13,21 @@ from datetime import datetime, timezone, timedelta
 # 📌 配置区域
 # ============================================================
 BASE_URL = "https://panel.orihost.com"
-# 续期页面（用于展示）
 PANEL_URL = "https://orihost.com"
 
 # ============================================================
-# 代理配置（可选）—— 解决 Cloudflare 拦截 / 数据中心 IP 被拒
-#   1. ORIHOST_PROXY="http://127.0.0.1:7890" — 显式指定
-#   2. HTTP_PROXY / HTTPS_PROXY              — 标准代理环境变量
-# 如果代理不可达，自动回退直连。
+# 代理配置
 # ============================================================
 ORIHOST_PROXY = os.environ.get("ORIHOST_PROXY") or ""
 PROXIES = {}
 if ORIHOST_PROXY:
     PROXIES = {"http": ORIHOST_PROXY, "https": ORIHOST_PROXY}
     print(f"  🔗 尝试使用 ORIHOST_PROXY: {ORIHOST_PROXY}")
-    # 检测代理是否可达，不可达则回退直连
     try:
         requests.get("http://www.gstatic.com/generate_204", proxies=PROXIES, timeout=5)
         print(f"  ✅ 代理可用")
     except Exception:
-        print(f"  ⚠️  代理不可达 ({ORIHOST_PROXY})，回退直连")
+        print(f"  ⚠️ 代理不可达 ({ORIHOST_PROXY})，回退直连")
         PROXIES = {}
 else:
     http_proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy") or ""
@@ -55,10 +44,6 @@ TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN") or ""
 
 # ============================================================
 # 多账号检测
-# 账号1: ORIHOST_COOKIE_1 + ORIHOST_SERVER_IDS_1
-# 账号2: ORIHOST_COOKIE_2 + ORIHOST_SERVER_IDS_2
-# ...
-# 向下兼容: ORIHOST_COOKIE + ORIHOST_SERVER_IDS（单账号）
 # ============================================================
 ACCOUNTS = []
 
@@ -78,7 +63,7 @@ for i in range(1, 100):
     else:
         break
 
-# 向下兼容：单账号（ORIHOST_COOKIE + ORIHOST_SERVER_IDS）
+# 向下兼容：单账号
 if not ACCOUNTS:
     legacy_cookie = os.environ.get("ORIHOST_COOKIE") or ""
     if legacy_cookie:
@@ -93,9 +78,6 @@ if not ACCOUNTS:
 
 if not ACCOUNTS:
     print("❌ 未配置任何 Cookie，脚本终止。")
-    print("   单账号: 设置 ORIHOST_COOKIE + ORIHOST_SERVER_IDS")
-    print("   多账号: 设置 ORIHOST_COOKIE_1 + ORIHOST_SERVER_IDS_1,")
-    print("            ORIHOST_COOKIE_2 + ORIHOST_SERVER_IDS_2, ...")
     sys.exit(1)
 
 print(f"📋 检测到 {len(ACCOUNTS)} 个账号")
@@ -120,10 +102,7 @@ def send_telegram(message: str):
 
 
 def parse_cookies(cookie_str: str) -> dict:
-    """
-    将 Cookie 字符串解析为字典，并对每个值做 URL 解码。
-    Jexactyl 面板的 cookie 值（如 XSRF-TOKEN、jexactyl_session）是 URL 编码的。
-    """
+    """解析 Cookie 字符串"""
     cookies = {}
     for item in cookie_str.split(";"):
         item = item.strip()
@@ -134,13 +113,18 @@ def parse_cookies(cookie_str: str) -> dict:
 
 
 def get_xsrf_token(cookie_str: str) -> str:
-    """从 Cookie 中提取 XSRF-TOKEN（URL 解码后用作请求头）"""
+    """从 Cookie 字符串中提取初始 XSRF-TOKEN"""
     cookies = parse_cookies(cookie_str)
     return cookies.get("XSRF-TOKEN", "")
 
 
+def get_session_cookie(session: requests.Session, name: str) -> str:
+    """安全提取 Session 中的 Cookie 值，避免多同名 Cookie 触发冲突异常"""
+    return session.cookies.get_dict().get(name, "")
+
+
 def build_headers(cookie_str: str, referer: str = "") -> dict:
-    """构造请求头"""
+    """构造基础请求头"""
     xsrf = get_xsrf_token(cookie_str)
     headers = {
         "accept": "application/json",
@@ -159,7 +143,7 @@ def build_headers(cookie_str: str, referer: str = "") -> dict:
 
 
 def format_notification(status: str, label: str, server_id: str, detail: str) -> str:
-    """格式化续期通知消息"""
+    """格式化通知内容"""
     now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
     lines = [
         "🖥 Orihost 免费服务器续期",
@@ -172,25 +156,19 @@ def format_notification(status: str, label: str, server_id: str, detail: str) ->
     ]
     return "\n".join(lines)
 
+
 # ------------------------------------------------------------
-# 续期函数
+# 续期核心流程
 # ------------------------------------------------------------
 def renew_server(cookie: str, server_id: str) -> dict:
-    """
-    通过 Jexactyl 面板 API 续期服务器 (使用 requests.Session 维持会话)
-    """
-    # 建立持久会话
+    """通过 Jexactyl 面板 API 维持会话续期服务器"""
     session = requests.Session()
     if PROXIES:
         session.proxies.update(PROXIES)
 
     # 载入初始 Cookie 与 Headers
-    init_cookies = parse_cookies(cookie)
-    session.cookies.update(init_cookies)
-
-    referer = f"{PANEL_URL}/server/{server_id[:8]}"
-    headers = build_headers(cookie, referer=referer)
-    session.headers.update(headers)
+    session.cookies.update(parse_cookies(cookie))
+    session.headers.update(build_headers(cookie, referer=f"{PANEL_URL}/server/{server_id[:8]}"))
 
     # Step 1: 开始续期
     begin_url = f"{BASE_URL}/api/client/servers/{server_id}/renew/begin"
@@ -202,7 +180,7 @@ def renew_server(cookie: str, server_id: str) -> dict:
         return {"status": "error", "message": f"请求失败: {e}"}
 
     if resp.status_code == 419:
-        print(f"  ❌ CSRF token mismatch (419) - Cookie 已过期，需重新登录获取")
+        print(f"  ❌ CSRF token mismatch (419) - Cookie 已过期")
         return {"status": "error", "message": "CSRF token mismatch (419) - Cookie 过期"}
     if resp.status_code == 401:
         print(f"  ❌ 401 Unauthenticated - Cookie 已失效")
@@ -220,15 +198,15 @@ def renew_server(cookie: str, server_id: str) -> dict:
     article_url = data.get("url", "")
     dwell_seconds = data.get("dwell_seconds", 15)
     print(f"  📰 文章: {article_url}")
-    
-    # 增加 3 秒缓冲，避免服务端判定未达到阅读时限
+
     wait_time = dwell_seconds + 3
     print(f"  ⏳ 等待 {wait_time} 秒（模拟阅读文章）...")
     time.sleep(wait_time)
 
-    # 同步可能被服务端刷新的 XSRF-TOKEN
-    if "XSRF-TOKEN" in session.cookies:
-        session.headers["x-xsrf-token"] = unquote(session.cookies.get("XSRF-TOKEN"))
+    # 安全同步新下发的 XSRF-TOKEN 请求头
+    latest_xsrf = get_session_cookie(session, "XSRF-TOKEN")
+    if latest_xsrf:
+        session.headers["x-xsrf-token"] = unquote(latest_xsrf)
 
     # Step 2: 完成续期
     complete_url = f"{BASE_URL}/api/client/renewal/complete"
@@ -255,12 +233,13 @@ def renew_server(cookie: str, server_id: str) -> dict:
         print(f"  ✅ 续期成功! renewed_count={renewed}")
         return {"status": "success", "message": f"续期成功 (+{renewed})"}
     elif skipped > 0:
-        print(f"  ⏭️  服务器被跳过 (skipped={skipped})，可能已达续期上限")
-        return {"status": "skipped", "message": f"服务器被跳过 (已达续期上限)"}
+        print(f"  ⏭️ 服务器被跳过 (skipped={skipped})，可能已达续期上限")
+        return {"status": "skipped", "message": "服务器被跳过 (已达续期上限)"}
     else:
         print(f"  ⚠️ 未预期响应: {result}")
         return {"status": "unknown", "message": f"未预期响应: {result}"}
-        
+
+
 # ------------------------------------------------------------
 # 主入口
 # ------------------------------------------------------------
@@ -307,7 +286,7 @@ def main():
 
             all_results.append(info)
 
-            # 每个服务器发一次 Telegram 通知
+            # 发送 Telegram 通知
             msg = format_notification(
                 info["status"],
                 info["label"],

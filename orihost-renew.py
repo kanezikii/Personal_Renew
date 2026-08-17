@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
+# 模板名称：Orihost 免费服务器续期脚本
+# 描述：通过 Jexactyl 面板 Cookie 直调续期接口
+#       支持多账号多服务器
+# 归类：Jexactyl/Pterodactyl 续期类型
+# ============================================================
 import os
 import sys
-import re
 import time
 import requests
 from urllib.parse import unquote
@@ -13,7 +17,7 @@ from datetime import datetime, timezone, timedelta
 # 📌 配置区域
 # ============================================================
 BASE_URL = "https://panel.orihost.com"
-PANEL_URL = "https://orihost.com"
+COOKIE_DOMAIN = "panel.orihost.com"
 
 # ============================================================
 # 代理配置
@@ -102,7 +106,7 @@ def send_telegram(message: str):
 
 
 def parse_cookies(cookie_str: str) -> dict:
-    """解析 Cookie 字符串"""
+    """将 Cookie 字符串解析为字典"""
     cookies = {}
     for item in cookie_str.split(";"):
         item = item.strip()
@@ -112,38 +116,26 @@ def parse_cookies(cookie_str: str) -> dict:
     return cookies
 
 
-def get_xsrf_token(cookie_str: str) -> str:
-    """从 Cookie 字符串中提取初始 XSRF-TOKEN"""
-    cookies = parse_cookies(cookie_str)
-    return cookies.get("XSRF-TOKEN", "")
-
-
-def get_session_cookie(session: requests.Session, name: str) -> str:
-    """安全提取 Session 中的 Cookie 值，避免多同名 Cookie 触发冲突异常"""
-    return session.cookies.get_dict().get(name, "")
-
-
-def build_headers(cookie_str: str, referer: str = "") -> dict:
-    """构造基础请求头"""
-    xsrf = get_xsrf_token(cookie_str)
-    headers = {
-        "accept": "application/json",
-        "accept-language": "zh-CN,zh;q=0.9",
-        "x-requested-with": "XMLHttpRequest",
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
-        "sec-fetch-dest": "empty",
-        "sec-fetch-mode": "cors",
-        "sec-fetch-site": "same-origin",
-    }
+def sync_and_clean_cookies(session: requests.Session, initial_cookies: dict = None):
+    """
+    扁平化并重设 Session 中的 Cookie，防止域名冲突和多版本 Session 共存
+    """
+    current_cookies = session.cookies.get_dict()
+    if initial_cookies:
+        current_cookies.update(initial_cookies)
+    
+    session.cookies.clear()
+    for k, v in current_cookies.items():
+        session.cookies.set(k, v, domain=COOKIE_DOMAIN, path="/")
+    
+    # 保持请求头中的 XSRF 令牌与当前 Cookie 同步
+    xsrf = current_cookies.get("XSRF-TOKEN")
     if xsrf:
-        headers["x-xsrf-token"] = xsrf
-    if referer:
-        headers["referer"] = referer
-    return headers
+        session.headers["x-xsrf-token"] = unquote(xsrf)
 
 
 def format_notification(status: str, label: str, server_id: str, detail: str) -> str:
-    """格式化通知内容"""
+    """格式化续期通知消息"""
     now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
     lines = [
         "🖥 Orihost 免费服务器续期",
@@ -161,16 +153,29 @@ def format_notification(status: str, label: str, server_id: str, detail: str) ->
 # 续期核心流程
 # ------------------------------------------------------------
 def renew_server(cookie: str, server_id: str) -> dict:
-    """通过 Jexactyl 面板 API 维持会话续期服务器"""
+    """通过 Jexactyl 面板 API 执行服务器续期流程"""
     session = requests.Session()
     if PROXIES:
         session.proxies.update(PROXIES)
 
-    # 载入初始 Cookie 与 Headers
-    session.cookies.update(parse_cookies(cookie))
-    session.headers.update(build_headers(cookie, referer=f"{PANEL_URL}/server/{server_id[:8]}"))
+    # 规范化 Referer 与基础请求头
+    referer = f"{BASE_URL}/server/{server_id[:8]}"
+    session.headers.update({
+        "accept": "application/json",
+        "accept-language": "zh-CN,zh;q=0.9",
+        "x-requested-with": "XMLHttpRequest",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+        "referer": referer,
+    })
 
-    # Step 1: 开始续期
+    # 载入初始 Cookie
+    init_cookies = parse_cookies(cookie)
+    sync_and_clean_cookies(session, init_cookies)
+
+    # Step 1: 开始续期会话
     begin_url = f"{BASE_URL}/api/client/servers/{server_id}/renew/begin"
     print(f"  🔄 [{server_id[:8]}] 开始续期...")
     try:
@@ -180,8 +185,8 @@ def renew_server(cookie: str, server_id: str) -> dict:
         return {"status": "error", "message": f"请求失败: {e}"}
 
     if resp.status_code == 419:
-        print(f"  ❌ CSRF token mismatch (419) - Cookie 已过期")
-        return {"status": "error", "message": "CSRF token mismatch (419) - Cookie 过期"}
+        print(f"  ❌ CSRF token mismatch (419) - Cookie 已过期，需重新获取")
+        return {"status": "error", "message": "CSRF mismatch (419) - Cookie 过期"}
     if resp.status_code == 401:
         print(f"  ❌ 401 Unauthenticated - Cookie 已失效")
         return {"status": "error", "message": "401 Unauthenticated - Cookie 失效"}
@@ -199,16 +204,15 @@ def renew_server(cookie: str, server_id: str) -> dict:
     dwell_seconds = data.get("dwell_seconds", 15)
     print(f"  📰 文章: {article_url}")
 
+    # 等待时限并增加 3 秒缓冲
     wait_time = dwell_seconds + 3
     print(f"  ⏳ 等待 {wait_time} 秒（模拟阅读文章）...")
     time.sleep(wait_time)
 
-    # 安全同步新下发的 XSRF-TOKEN 请求头
-    latest_xsrf = get_session_cookie(session, "XSRF-TOKEN")
-    if latest_xsrf:
-        session.headers["x-xsrf-token"] = unquote(latest_xsrf)
+    # 再次清洗并同步第一步返回的最新 Session 与 XSRF
+    sync_and_clean_cookies(session)
 
-    # Step 2: 完成续期
+    # Step 2: 提交完成续期
     complete_url = f"{BASE_URL}/api/client/renewal/complete"
     try:
         resp2 = session.get(complete_url, timeout=30)

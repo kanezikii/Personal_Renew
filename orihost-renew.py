@@ -17,7 +17,6 @@ from datetime import datetime, timezone, timedelta
 # 📌 配置区域
 # ============================================================
 BASE_URL = "https://panel.orihost.com"
-COOKIE_DOMAIN = "panel.orihost.com"
 
 # ============================================================
 # 代理配置
@@ -116,26 +115,26 @@ def parse_cookies(cookie_str: str) -> dict:
     return cookies
 
 
-def sync_and_clean_cookies(session: requests.Session, initial_cookies: dict = None):
-    """
-    扁平化并重设 Session 中的 Cookie，防止域名冲突和多版本 Session 共存
-    """
-    current_cookies = session.cookies.get_dict()
-    if initial_cookies:
-        current_cookies.update(initial_cookies)
-    
-    session.cookies.clear()
-    for k, v in current_cookies.items():
-        session.cookies.set(k, v, domain=COOKIE_DOMAIN, path="/")
-    
-    # 保持请求头中的 XSRF 令牌与当前 Cookie 同步
-    xsrf = current_cookies.get("XSRF-TOKEN")
-    if xsrf:
-        session.headers["x-xsrf-token"] = unquote(xsrf)
+def build_headers(xsrf_token: str, server_id: str) -> dict:
+    """构造标准请求头"""
+    headers = {
+        "accept": "application/json, text/plain, */*",
+        "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "x-requested-with": "XMLHttpRequest",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+        "origin": BASE_URL,
+        "referer": f"{BASE_URL}/server/{server_id[:8]}",
+    }
+    if xsrf_token:
+        headers["x-xsrf-token"] = xsrf_token
+    return headers
 
 
 def format_notification(status: str, label: str, server_id: str, detail: str) -> str:
-    """格式化续期通知消息"""
+    """格式化通知信息"""
     now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
     lines = [
         "🖥 Orihost 免费服务器续期",
@@ -153,39 +152,21 @@ def format_notification(status: str, label: str, server_id: str, detail: str) ->
 # 续期核心流程
 # ------------------------------------------------------------
 def renew_server(cookie: str, server_id: str) -> dict:
-    """通过 Jexactyl 面板 API 执行服务器续期流程"""
-    session = requests.Session()
-    if PROXIES:
-        session.proxies.update(PROXIES)
+    """通过精确字典同步执行续期流程"""
+    cookie_dict = parse_cookies(cookie)
+    headers = build_headers(cookie_dict.get("XSRF-TOKEN", ""), server_id)
 
-    # 规范化 Referer 与基础请求头
-    referer = f"{BASE_URL}/server/{server_id[:8]}"
-    session.headers.update({
-        "accept": "application/json",
-        "accept-language": "zh-CN,zh;q=0.9",
-        "x-requested-with": "XMLHttpRequest",
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
-        "sec-fetch-dest": "empty",
-        "sec-fetch-mode": "cors",
-        "sec-fetch-site": "same-origin",
-        "referer": referer,
-    })
-
-    # 载入初始 Cookie
-    init_cookies = parse_cookies(cookie)
-    sync_and_clean_cookies(session, init_cookies)
-
-    # Step 1: 开始续期会话
+    # Step 1: 发起续期请求
     begin_url = f"{BASE_URL}/api/client/servers/{server_id}/renew/begin"
     print(f"  🔄 [{server_id[:8]}] 开始续期...")
     try:
-        resp = session.post(begin_url, timeout=30)
+        resp = requests.post(begin_url, headers=headers, cookies=cookie_dict, timeout=30, proxies=PROXIES or None)
     except Exception as e:
         print(f"  ❌ 请求失败: {e}")
         return {"status": "error", "message": f"请求失败: {e}"}
 
     if resp.status_code == 419:
-        print(f"  ❌ CSRF token mismatch (419) - Cookie 已过期，需重新获取")
+        print(f"  ❌ CSRF mismatch (419) - Cookie 已过期")
         return {"status": "error", "message": "CSRF mismatch (419) - Cookie 过期"}
     if resp.status_code == 401:
         print(f"  ❌ 401 Unauthenticated - Cookie 已失效")
@@ -200,22 +181,27 @@ def renew_server(cookie: str, server_id: str) -> dict:
         print(f"  ❌ begin 响应解析失败: {resp.text[:200]}")
         return {"status": "error", "message": "begin 响应解析失败"}
 
+    # 提取第 1 步返回的最新 Session 与 XSRF Token
+    new_cookies = resp.cookies.get_dict()
+    if new_cookies:
+        cookie_dict.update(new_cookies)
+        if "XSRF-TOKEN" in cookie_dict:
+            headers["x-xsrf-token"] = cookie_dict["XSRF-TOKEN"]
+        print(f"  🔄 Session 状态已同步更新")
+
     article_url = data.get("url", "")
     dwell_seconds = data.get("dwell_seconds", 15)
     print(f"  📰 文章: {article_url}")
 
-    # 等待时限并增加 3 秒缓冲
+    # 增加 3 秒延迟缓冲
     wait_time = dwell_seconds + 3
     print(f"  ⏳ 等待 {wait_time} 秒（模拟阅读文章）...")
     time.sleep(wait_time)
 
-    # 再次清洗并同步第一步返回的最新 Session 与 XSRF
-    sync_and_clean_cookies(session)
-
     # Step 2: 提交完成续期
     complete_url = f"{BASE_URL}/api/client/renewal/complete"
     try:
-        resp2 = session.get(complete_url, timeout=30)
+        resp2 = requests.get(complete_url, headers=headers, cookies=cookie_dict, timeout=30, proxies=PROXIES or None)
     except Exception as e:
         print(f"  ❌ complete 请求失败: {e}")
         return {"status": "error", "message": f"complete 请求失败: {e}"}

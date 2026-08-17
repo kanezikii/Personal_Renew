@@ -134,7 +134,7 @@ def build_headers(xsrf_token: str, server_id: str) -> dict:
 
 
 def format_notification(status: str, label: str, server_id: str, detail: str) -> str:
-    """格式化通知信息"""
+    """格式化通知内容"""
     now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
     lines = [
         "🖥 Orihost 免费服务器续期",
@@ -152,7 +152,7 @@ def format_notification(status: str, label: str, server_id: str, detail: str) ->
 # 续期核心流程
 # ------------------------------------------------------------
 def renew_server(cookie: str, server_id: str) -> dict:
-    """通过精确字典同步执行续期流程"""
+    """执行服务器续期流程"""
     cookie_dict = parse_cookies(cookie)
     headers = build_headers(cookie_dict.get("XSRF-TOKEN", ""), server_id)
 
@@ -181,7 +181,7 @@ def renew_server(cookie: str, server_id: str) -> dict:
         print(f"  ❌ begin 响应解析失败: {resp.text[:200]}")
         return {"status": "error", "message": "begin 响应解析失败"}
 
-    # 提取第 1 步返回的最新 Session 与 XSRF Token
+    # 更新服务端下发的最新 Cookie 与 XSRF Token
     new_cookies = resp.cookies.get_dict()
     if new_cookies:
         cookie_dict.update(new_cookies)
@@ -193,41 +193,61 @@ def renew_server(cookie: str, server_id: str) -> dict:
     dwell_seconds = data.get("dwell_seconds", 15)
     print(f"  📰 文章: {article_url}")
 
-    # 增加 3 秒延迟缓冲
+    # 等待时限并增加 3 秒缓冲
     wait_time = dwell_seconds + 3
     print(f"  ⏳ 等待 {wait_time} 秒（模拟阅读文章）...")
     time.sleep(wait_time)
 
-    # Step 2: 提交完成续期
-    complete_url = f"{BASE_URL}/api/client/renewal/complete"
-    try:
-        resp2 = requests.get(complete_url, headers=headers, cookies=cookie_dict, timeout=30, proxies=PROXIES or None)
-    except Exception as e:
-        print(f"  ❌ complete 请求失败: {e}")
-        return {"status": "error", "message": f"complete 请求失败: {e}"}
+    # Step 2: 提交完成续期（包含服务器作用域路由及兼容回退）
+    candidate_endpoints = [
+        ("GET", f"{BASE_URL}/api/client/servers/{server_id}/renew/complete"),
+        ("POST", f"{BASE_URL}/api/client/servers/{server_id}/renew/complete"),
+        ("POST", f"{BASE_URL}/api/client/servers/{server_id}/renew"),
+        ("GET", f"{BASE_URL}/api/client/servers/{server_id}/renewal/complete"),
+        ("POST", f"{BASE_URL}/api/client/servers/{server_id}/renewal/complete"),
+        ("GET", f"{BASE_URL}/api/client/renewal/complete?server={server_id}"),
+        ("GET", f"{BASE_URL}/api/client/renewal/complete"),
+    ]
 
-    if resp2.status_code != 200:
-        print(f"  ❌ complete 失败 HTTP {resp2.status_code}: {resp2.text[:200]}")
-        return {"status": "error", "message": f"complete HTTP {resp2.status_code}"}
+    last_error_msg = ""
+    for method, url in candidate_endpoints:
+        try:
+            if method == "GET":
+                resp2 = requests.get(url, headers=headers, cookies=cookie_dict, timeout=30, proxies=PROXIES or None)
+            else:
+                resp2 = requests.post(url, headers=headers, cookies=cookie_dict, timeout=30, proxies=PROXIES or None)
+        except Exception as e:
+            last_error_msg = str(e)
+            continue
 
-    try:
-        result = resp2.json()
-    except Exception:
-        result = {}
-        print(f"  ⚠️ complete 响应解析失败: {resp2.text[:200]}")
+        # 若命中非当前版本的接口（如 404 / 405），尝试下一个候选接口
+        if resp2.status_code in (404, 405):
+            continue
 
-    renewed = result.get("renewed_count", 0)
-    skipped = result.get("skipped_count", 0)
+        if resp2.status_code != 200:
+            last_error_msg = f"HTTP {resp2.status_code}: {resp2.text[:150]}"
+            continue
 
-    if renewed > 0:
-        print(f"  ✅ 续期成功! renewed_count={renewed}")
-        return {"status": "success", "message": f"续期成功 (+{renewed})"}
-    elif skipped > 0:
-        print(f"  ⏭️ 服务器被跳过 (skipped={skipped})，可能已达续期上限")
-        return {"status": "skipped", "message": "服务器被跳过 (已达续期上限)"}
-    else:
-        print(f"  ⚠️ 未预期响应: {result}")
-        return {"status": "unknown", "message": f"未预期响应: {result}"}
+        try:
+            result = resp2.json()
+        except Exception:
+            result = {}
+
+        renewed = result.get("renewed_count", 0)
+        skipped = result.get("skipped_count", 0)
+
+        if renewed > 0 or result.get("success") is True or "success" in str(result).lower():
+            print(f"  ✅ 续期成功! 返回: {result}")
+            return {"status": "success", "message": f"续期成功 (+{renewed if renewed else 1})"}
+        elif skipped > 0:
+            print(f"  ⏭️ 服务器已跳过 (skipped={skipped})，已达续期上限")
+            return {"status": "skipped", "message": "服务器被跳过 (已达续期上限)"}
+        else:
+            print(f"  ✅ 接口调用完成: {result}")
+            return {"status": "success", "message": f"续期完成: {result}"}
+
+    print(f"  ❌ complete 失败: {last_error_msg}")
+    return {"status": "error", "message": last_error_msg or "续期完成请求失败"}
 
 
 # ------------------------------------------------------------

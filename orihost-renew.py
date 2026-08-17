@@ -172,37 +172,31 @@ def format_notification(status: str, label: str, server_id: str, detail: str) ->
     ]
     return "\n".join(lines)
 
-
 # ------------------------------------------------------------
 # 续期函数
 # ------------------------------------------------------------
 def renew_server(cookie: str, server_id: str) -> dict:
     """
-    通过 Jexactyl 面板 API 续期服务器
-
-    Orihost 续期流程（需要在面板点击 Read Article 后等待再 Claim）：
-      1. POST /api/client/servers/{server}/renew/begin
-         → 返回 {url: "文章链接", dwell_seconds: 15}，启动续期会话
-      2. 等待 dwell_seconds 秒（模拟阅读文章）
-      3. GET  /api/client/renewal/complete
-         → 返回 {renewed_count: N, skipped_count: M}，完成续期
-
-    Args:
-        cookie: Cookie 字符串
-        server_id: 服务器 UUID（如 738a4f39-7cdf-4cf5-ac97-f8d866f0cadc）
-
-    Returns:
-        包含续期结果的字典
+    通过 Jexactyl 面板 API 续期服务器 (使用 requests.Session 维持会话)
     """
+    # 建立持久会话
+    session = requests.Session()
+    if PROXIES:
+        session.proxies.update(PROXIES)
+
+    # 载入初始 Cookie 与 Headers
+    init_cookies = parse_cookies(cookie)
+    session.cookies.update(init_cookies)
+
     referer = f"{PANEL_URL}/server/{server_id[:8]}"
     headers = build_headers(cookie, referer=referer)
-    cookies = parse_cookies(cookie)
+    session.headers.update(headers)
 
     # Step 1: 开始续期
     begin_url = f"{BASE_URL}/api/client/servers/{server_id}/renew/begin"
     print(f"  🔄 [{server_id[:8]}] 开始续期...")
     try:
-        resp = requests.post(begin_url, headers=headers, cookies=cookies, timeout=30, proxies=PROXIES or None)
+        resp = session.post(begin_url, timeout=30)
     except Exception as e:
         print(f"  ❌ 请求失败: {e}")
         return {"status": "error", "message": f"请求失败: {e}"}
@@ -226,13 +220,20 @@ def renew_server(cookie: str, server_id: str) -> dict:
     article_url = data.get("url", "")
     dwell_seconds = data.get("dwell_seconds", 15)
     print(f"  📰 文章: {article_url}")
-    print(f"  ⏳ 等待 {dwell_seconds} 秒（模拟阅读文章）...")
-    time.sleep(dwell_seconds + 1)
+    
+    # 增加 3 秒缓冲，避免服务端判定未达到阅读时限
+    wait_time = dwell_seconds + 3
+    print(f"  ⏳ 等待 {wait_time} 秒（模拟阅读文章）...")
+    time.sleep(wait_time)
+
+    # 同步可能被服务端刷新的 XSRF-TOKEN
+    if "XSRF-TOKEN" in session.cookies:
+        session.headers["x-xsrf-token"] = unquote(session.cookies.get("XSRF-TOKEN"))
 
     # Step 2: 完成续期
     complete_url = f"{BASE_URL}/api/client/renewal/complete"
     try:
-        resp2 = requests.get(complete_url, headers=headers, cookies=cookies, timeout=30, proxies=PROXIES or None)
+        resp2 = session.get(complete_url, timeout=30)
     except Exception as e:
         print(f"  ❌ complete 请求失败: {e}")
         return {"status": "error", "message": f"complete 请求失败: {e}"}
@@ -254,14 +255,12 @@ def renew_server(cookie: str, server_id: str) -> dict:
         print(f"  ✅ 续期成功! renewed_count={renewed}")
         return {"status": "success", "message": f"续期成功 (+{renewed})"}
     elif skipped > 0:
-        # 可能已达该周期的续期上限（页面显示 Renew Limit Reached）
         print(f"  ⏭️  服务器被跳过 (skipped={skipped})，可能已达续期上限")
         return {"status": "skipped", "message": f"服务器被跳过 (已达续期上限)"}
     else:
         print(f"  ⚠️ 未预期响应: {result}")
         return {"status": "unknown", "message": f"未预期响应: {result}"}
-
-
+        
 # ------------------------------------------------------------
 # 主入口
 # ------------------------------------------------------------

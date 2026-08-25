@@ -47,7 +47,7 @@ def format_notification(status: str, extra: str = "", error: str = "", expiry_da
         masked_email = EMAIL[:2] + '****'
 
     lines = [
-        "🚀 Pingless 续期通知",
+        "💗主人,Pingless续期通知",
         "",
         f"{status}",
     ]

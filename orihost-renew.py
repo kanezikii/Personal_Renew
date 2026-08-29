@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Orihost 自动续期脚本 (Playwright 精准坐标点击 Turnstile 版)
+# Orihost 自动续期脚本 (Playwright 穿透双层 Closed Shadow DOM 版)
 # ============================================================
 import os
 import sys
@@ -60,7 +60,7 @@ def parse_cookies_for_playwright(cookie_str: str) -> list:
 
 
 def clean_ad_overlays(page):
-    """清理遮挡点击的第三方广告弹窗"""
+    """清理遮挡点击的第三方广告弹窗（保留 Cloudflare 验证）"""
     try:
         page.evaluate("""
             document.querySelectorAll('iframe:not([src*="challenges.cloudflare.com"]):not([src*="cloudflare"])').forEach(el => el.remove());
@@ -70,41 +70,58 @@ def clean_ad_overlays(page):
         pass
 
 
-def solve_turnstile_with_retry(page, claim_btn, max_retries=10):
-    """精准点击 Cloudflare Turnstile 复选框并等待按钮激活"""
-    print("  🛡️ 正在精准定位并点击 Cloudflare Turnstile...")
+def solve_turnstile_closed_shadow_dom(page, claim_btn, max_retries=12) -> bool:
+    """穿透双层 Closed Shadow DOM 精准点击 Turnstile 复选框"""
+    print("  🛡️ 正在寻找并穿透 Turnstile (Closed Shadow DOM)...")
 
     for attempt in range(1, max_retries + 1):
         if claim_btn.first.is_enabled():
-            print("  🎉 Claim Renewal 按钮已解除禁用（验证已通过）！")
+            print("  🎉 Claim Renewal 按钮已成功激活！")
             return True
 
-        # 方式 1: 直接获取主页面中的 Cloudflare iframe 绝对坐标
-        cf_iframes = page.locator("iframe[src*='challenges.cloudflare.com'], iframe[src*='turnstile']")
-        if cf_iframes.count() > 0:
-            for idx in range(cf_iframes.count()):
-                iframe = cf_iframes.nth(idx)
-                if iframe.is_visible():
-                    bbox = iframe.bounding_box()
-                    if bbox and bbox["width"] > 0 and bbox["height"] > 0:
-                        # Turnstile 复选框通常位于 iframe 左侧约 28-35px，垂直居中
-                        box_x = bbox["x"] + 32
-                        box_y = bbox["y"] + (bbox["height"] / 2)
+        # 遍历所有 Frame 穿透外层 Shadow DOM
+        cf_frame = None
+        for f in page.frames:
+            if "challenges.cloudflare.com" in f.url or "turnstile" in f.url:
+                cf_frame = f
+                break
 
-                        print(f"  👆 [尝试 {attempt}] 物理鼠标移动并点击 Turnstile 勾选框坐标 ({box_x:.1f}, {box_y:.1f})...")
-                        page.mouse.move(box_x, box_y, steps=8)
-                        time.sleep(0.3)
-                        page.mouse.click(box_x, box_y)
-                        break
+        if cf_frame:
+            # 策略 1: 获取 iframe 元素在主视口中的绝对坐标并模拟物理鼠标划动点击
+            try:
+                fe = cf_frame.frame_element()
+                bbox = fe.bounding_box()
+                if bbox and bbox["width"] > 0 and bbox["height"] > 0:
+                    # 勾选框位于 iframe 左侧 32px，垂直居中
+                    target_x = bbox["x"] + 32
+                    target_y = bbox["y"] + (bbox["height"] / 2)
 
-        # 方式 2: 使用 FrameLocator 兜底派发内部原生点击
-        try:
-            cf_frame = page.frame_locator("iframe[src*='challenges.cloudflare.com']").first
-            cf_frame.locator("body, input[type='checkbox'], .ctp-checkbox-label").first.click(force=True, timeout=1000)
-        except Exception:
-            pass
+                    print(f"  👆 [尝试 {attempt}] 物理鼠标点击绝对坐标 ({target_x:.1f}, {target_y:.1f})...")
+                    page.mouse.move(target_x, target_y, steps=6)
+                    time.sleep(0.2)
+                    page.mouse.click(target_x, target_y)
+            except Exception as e:
+                print(f"  ⚠️ 绝对坐标点击异常: {e}")
 
-        # 等待 2 秒检测状态
+            # 策略 2: 在 Frame 内部通过 body 相对像素坐标直接派发点击（穿透内部 Shadow DOM）
+            try:
+                cf_frame.locator("body").click(position={"x": 32, "y": 32}, force=True, timeout=1500)
+            except Exception:
+                pass
+        else:
+            # 策略 3: 回退主容器中心左侧点击
+            try:
+                container = page.locator("div.mt-3.flex.justify-center").first
+                if container.is_visible():
+                    c_box = container.bounding_box()
+                    if c_box:
+                        # 300px 宽度的 iframe 居中于容器，计算左侧复选框位置
+                        c_x = c_box["x"] + (c_box["width"] - 300) / 2 + 32
+                        c_y = c_box["y"] + c_box["height"] / 2
+                        page.mouse.click(c_x, c_y)
+            except Exception:
+                pass
+
         time.sleep(2)
 
     return claim_btn.first.is_enabled()
@@ -118,7 +135,7 @@ def renew_single_server(page, context, server_id: str) -> dict:
     time.sleep(3)
     take_shot(page, f"{server_id[:8]}_01_console")
 
-    # 关闭 Cookie 提示与广告
+    # 关闭 Cookie 提示与多余广告
     try:
         got_it = page.locator("button:has-text('Got it')")
         if got_it.count() > 0:
@@ -171,15 +188,15 @@ def renew_single_server(page, context, server_id: str) -> dict:
         take_shot(page, f"{server_id[:8]}_error_no_claim_btn")
         return {"status": "error", "message": "未找到 Claim Renewal 按钮"}
 
-    # 执行精准定位点击与等待激活
-    is_ready = solve_turnstile_with_retry(page, claim_btn, max_retries=10)
+    # 穿透 Shadow DOM 点击 Turnstile 验证框
+    is_ready = solve_turnstile_closed_shadow_dom(page, claim_btn, max_retries=12)
     take_shot(page, f"{server_id[:8]}_05_turnstile_finished")
 
     if not is_ready:
         take_shot(page, f"{server_id[:8]}_error_claim_still_disabled")
-        return {"status": "error", "message": "Turnstile 验证码未能在时限内通过"}
+        return {"status": "error", "message": "Turnstile 验证码未能在时限内激活按钮"}
 
-    # 点击提交续期
+    # 提交续期
     try:
         print("  🔘 点击 Claim Renewal 提交续期...")
         claim_btn.first.click(force=True, timeout=8000)
@@ -201,7 +218,7 @@ def renew_single_server(page, context, server_id: str) -> dict:
 
 def main():
     print("=" * 40)
-    print(" Orihost 自动续期 (Playwright 精准点击版)")
+    print(" Orihost 自动续期 (Playwright 穿透 Shadow DOM 版)")
     print("=" * 40)
 
     cookie = os.environ.get("ORIHOST_COOKIE") or os.environ.get("ORIHOST_COOKIE_1") or ""

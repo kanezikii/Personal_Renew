@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Orihost 自动续期脚本 (Playwright 引擎 + 自动截图取证)
+# Orihost 自动续期脚本 (Playwright + Xvfb 穿透 Turnstile 版)
 # ============================================================
 import os
 import sys
@@ -17,7 +17,6 @@ TG_CHAT_ID = os.environ.get("TG_CHAT_ID") or ""
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN") or ""
 ORIHOST_PROXY = os.environ.get("ORIHOST_PROXY") or os.environ.get("HTTP_PROXY") or ""
 
-# 创建截图保存目录
 SCREENSHOT_DIR = Path("screenshots")
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -60,20 +59,25 @@ def parse_cookies_for_playwright(cookie_str: str) -> list:
     return playwright_cookies
 
 
-def solve_turnstile_if_present(page, timeout=15):
-    """检测并尝试点击 Cloudflare Turnstile 验证复选框"""
-    print("  🛡️ 检测 Cloudflare Turnstile 验证...")
+def solve_turnstile_if_present(page, timeout=30):
+    """检测并模拟物理鼠标点击 Cloudflare Turnstile 验证框"""
+    print("  🛡️ 正在检测并穿透 Cloudflare Turnstile 验证...")
     start_time = time.time()
     while time.time() - start_time < timeout:
         for frame in page.frames:
             if "challenges.cloudflare.com" in frame.url:
                 try:
-                    box = frame.locator("input[type='checkbox'], .ctp-checkbox-label, #challenge-stage, body")
-                    if box.count() > 0:
-                        print("  👆 点击 Cloudflare 验证区域...")
-                        box.first.click(force=True)
-                        time.sleep(3)
-                        return True
+                    box_elem = frame.locator("input[type='checkbox'], .ctp-checkbox-label, #challenge-stage")
+                    if box_elem.count() > 0 and box_elem.first.is_visible():
+                        bbox = box_elem.first.bounding_box()
+                        if bbox:
+                            # 模拟真实鼠标划动并点击
+                            page.mouse.move(bbox["x"] + bbox["width"] / 2, bbox["y"] + bbox["height"] / 2)
+                            time.sleep(0.3)
+                            page.mouse.click(bbox["x"] + bbox["width"] / 2, bbox["y"] + bbox["height"] / 2)
+                            print("  👆 已模拟鼠标点击 Turnstile 验证框...")
+                            time.sleep(4)
+                            return True
                 except Exception:
                     pass
         time.sleep(1)
@@ -88,12 +92,19 @@ def renew_single_server(page, context, server_id: str) -> dict:
     time.sleep(3)
     take_shot(page, f"{server_id[:8]}_01_console")
 
-    # 检查是否跳转到登录页
+    # 关闭可能遮挡视线的底部 Cookie 提示
+    try:
+        got_it = page.locator("button:has-text('Got it')")
+        if got_it.count() > 0 and got_it.first.is_visible():
+            got_it.first.click()
+            time.sleep(1)
+    except Exception:
+        pass
+
     if "login" in page.url.lower():
         take_shot(page, f"{server_id[:8]}_error_login")
         return {"status": "error", "message": "Cookie 已失效，跳转到了登录页"}
 
-    # 点击页面右下角的 Renew 按钮
     renew_btn = page.locator("button:has-text('Renew'), button:has-text('续期')")
     if renew_btn.count() == 0:
         take_shot(page, f"{server_id[:8]}_error_no_renew_btn")
@@ -104,7 +115,7 @@ def renew_single_server(page, context, server_id: str) -> dict:
     time.sleep(2)
     take_shot(page, f"{server_id[:8]}_02_modal_opened")
 
-    # 检查弹窗中是否有 Read Article 按钮
+    # 点击广告文章
     read_article_btn = page.locator("button:has-text('Read Article'), button:has-text('阅读文章')")
     if read_article_btn.count() > 0:
         print("  📰 点击 Read Article 并监听新标签页...")
@@ -128,28 +139,33 @@ def renew_single_server(page, context, server_id: str) -> dict:
 
     take_shot(page, f"{server_id[:8]}_04_after_ad_returned")
 
-    # 尝试处理 Cloudflare Turnstile 验证
-    solve_turnstile_if_present(page, timeout=15)
+    # 穿透 Turnstile 验证
+    solve_turnstile_if_present(page, timeout=20)
     take_shot(page, f"{server_id[:8]}_05_turnstile_finished")
 
-    # 检查 Claim Renewal 按钮状态
     claim_btn = page.locator("button:has-text('Claim Renewal'), button:has-text('Claim')")
     if claim_btn.count() == 0:
         take_shot(page, f"{server_id[:8]}_error_no_claim_btn")
         return {"status": "error", "message": "未找到 Claim Renewal 按钮"}
 
+    # 等待 Claim Renewal 按钮解除禁用（最多等 20 秒）
+    print("  ⏳ 等待 Claim Renewal 按钮解除禁用...")
+    for _ in range(20):
+        if claim_btn.first.is_enabled():
+            print("  ✅ Claim Renewal 按钮已激活！")
+            break
+        time.sleep(1)
+
     try:
-        # 等待按钮处于可用状态（最多等 10 秒）
-        print("  🔘 尝试点击 Claim Renewal 提交续期...")
-        claim_btn.first.click(timeout=10000)
+        print("  🔘 点击 Claim Renewal 提交续期...")
+        claim_btn.first.click(timeout=8000)
         time.sleep(4)
     except Exception as e:
         take_shot(page, f"{server_id[:8]}_error_claim_disabled")
-        return {"status": "error", "message": f"按钮可能处于禁用状态 (已达天数上限或需人机验证): {e}"}
+        return {"status": "error", "message": f"按钮未能成功激活: {e}"}
 
     take_shot(page, f"{server_id[:8]}_06_final_result")
 
-    # 检查页面反馈
     content = page.content()
     if "success" in content.lower() or "renewed" in content.lower():
         return {"status": "success", "message": "续期成功 (+7 天)"}
@@ -161,7 +177,7 @@ def renew_single_server(page, context, server_id: str) -> dict:
 
 def main():
     print("=" * 40)
-    print(" Orihost 自动续期 (Playwright 截图排查版)")
+    print(" Orihost 自动续期 (Playwright + Xvfb 穿透版)")
     print("=" * 40)
 
     cookie = os.environ.get("ORIHOST_COOKIE") or os.environ.get("ORIHOST_COOKIE_1") or ""
@@ -175,19 +191,31 @@ def main():
     proxy_cfg = {"server": ORIHOST_PROXY} if ORIHOST_PROXY else None
 
     with sync_playwright() as p:
+        # 使用真实有头模式（配合 Xvfb）消除无头特征
         browser = p.chromium.launch(
-            headless=True,
+            headless=False,
             proxy=proxy_cfg,
             args=[
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
+                "--window-size=1920,1080",
+                "--start-maximized",
             ]
         )
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800}
+            viewport={"width": 1920, "height": 1080},
+            locale="zh-CN",
+            timezone_id="Asia/Shanghai"
         )
+
+        # 注入反自动化检测脚本
+        context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            window.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {}, app: {} };
+        """)
 
         # 注入 Cookie
         context.add_cookies(parse_cookies_for_playwright(cookie))

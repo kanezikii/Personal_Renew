@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# ============================================================
-# 模板名称：Orihost 免费服务器续期脚本
-# 描述：通过 Jexactyl 面板 Cookie 直调续期接口
-#       支持多账号多服务器，支持自定义剩余天数续期阈值
-# 归类：Jexactyl/Pterodactyl 续期类型
-# ============================================================
+
 import os
 import sys
 import time
@@ -18,7 +13,6 @@ from datetime import datetime, timezone, timedelta
 # ============================================================
 BASE_URL = "https://panel.orihost.com"
 
-# 续期阈值（单位：天）：当剩余天数 <= 该阈值时发起续期，默认 3 天
 RENEW_THRESHOLD_DAYS = int(os.environ.get("ORIHOST_RENEW_THRESHOLD_DAYS") or 3)
 
 # ============================================================
@@ -193,7 +187,7 @@ def format_notification(status: str, label: str, server_id: str, detail: str) ->
 # 续期核心流程
 # ------------------------------------------------------------
 def renew_server(cookie: str, server_id: str) -> dict:
-    """检查剩余天数并在 <= 3 天时执行续期"""
+    """检查剩余天数并在 <= 4 天时执行续期"""
     cookie_dict = parse_cookies(cookie)
     headers = build_headers(cookie_dict.get("XSRF-TOKEN", ""), server_id)
 

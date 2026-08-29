@@ -37,4 +37,4 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           ORIHOST_PROXY: http://127.0.0.1:1081
-        run: python orihost_playwright.py
+        run: python orihost-renew.py

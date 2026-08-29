@@ -22,6 +22,7 @@ jobs:
         run: |
           pip install requests playwright
           playwright install chromium --with-deps
+          sudo apt-get update && sudo apt-get install -y xvfb
 
       - name: ⚙ 设置代理 (sing-box)
         continue-on-error: true
@@ -30,14 +31,14 @@ jobs:
         run: |
           bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
 
-      - name: Run Playwright Renew
+      - name: Run Playwright Renew (with Xvfb)
         env:
           ORIHOST_COOKIE: ${{ secrets.ORIHOST_COOKIE }}
           ORIHOST_SERVER_IDS: ${{ vars.ORIHOST_SERVER_IDS }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           ORIHOST_PROXY: http://127.0.0.1:1081
-        run: python orihost-renew.py
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python orihost-renew.py
 
       - name: 📸 上传运行过程截图 (Artifact)
         if: always()

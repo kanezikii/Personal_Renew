@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
+# ============================================================
+# 模板名称：Orihost 免费服务器续期测试脚本
+# 描述：通过 Jexactyl 面板 Cookie 直调续期接口（测试模式：无阈值、无等待）
+# ============================================================
 import os
 import sys
-import time
 import requests
 from urllib.parse import unquote
 from datetime import datetime, timezone, timedelta
@@ -12,8 +14,6 @@ from datetime import datetime, timezone, timedelta
 # 📌 配置区域
 # ============================================================
 BASE_URL = "https://panel.orihost.com"
-
-RENEW_THRESHOLD_DAYS = int(os.environ.get("ORIHOST_RENEW_THRESHOLD_DAYS") or 10)
 
 # ============================================================
 # 代理配置
@@ -25,7 +25,7 @@ if ORIHOST_PROXY:
     print(f"  🔗 尝试使用 ORIHOST_PROXY: {ORIHOST_PROXY}")
     try:
         requests.get("http://www.gstatic.com/generate_204", proxies=PROXIES, timeout=5)
-        print(f"  ✅ 代理可用")
+        print("  ✅ 代理可用")
     except Exception:
         print(f"  ⚠️ 代理不可达 ({ORIHOST_PROXY})，回退直连")
         PROXIES = {}
@@ -80,7 +80,7 @@ if not ACCOUNTS:
     print("❌ 未配置任何 Cookie，脚本终止。")
     sys.exit(1)
 
-print(f"📋 检测到 {len(ACCOUNTS)} 个账号，续期阈值: <= {RENEW_THRESHOLD_DAYS} 天")
+print(f"📋 检测到 {len(ACCOUNTS)} 个账号（测试模式：已停用阈值与阅读等待）")
 for acc in ACCOUNTS:
     print(f"   {acc['label']}: {', '.join(acc['server_ids'])}")
 
@@ -91,12 +91,10 @@ for acc in ACCOUNTS:
 def send_telegram(message: str):
     """发送 Telegram 通知"""
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        print("⚠️ Telegram 未配置，跳过通知")
         return
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     try:
         requests.post(url, json={"chat_id": TG_CHAT_ID, "text": message}, timeout=10, proxies=PROXIES or None)
-        print("  ✅ Telegram 通知已发送")
     except Exception as e:
         print(f"  ❌ Telegram 发送失败: {e}")
 
@@ -130,44 +128,6 @@ def build_headers(xsrf_token: str, server_id: str) -> dict:
     return headers
 
 
-def parse_renewal_days(val) -> float:
-    """解析服务器剩余续期天数"""
-    if val is None:
-        return None
-    if isinstance(val, (int, float)):
-        return float(val)
-    if isinstance(val, str):
-        try:
-            return float(val.strip())
-        except ValueError:
-            pass
-        for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-            try:
-                dt = datetime.strptime(val.split("+")[0], fmt).replace(tzinfo=timezone.utc)
-                now = datetime.now(timezone.utc)
-                return max(0.0, (dt - now).total_seconds() / 86400.0)
-            except Exception:
-                continue
-    return None
-
-
-def get_server_details(cookie_dict: dict, headers: dict, server_id: str) -> dict:
-    """获取服务器详情与剩余天数"""
-    url = f"{BASE_URL}/api/client/servers/{server_id}"
-    try:
-        resp = requests.get(url, headers=headers, cookies=cookie_dict, timeout=30, proxies=PROXIES or None)
-        if resp.status_code == 200:
-            data = resp.json()
-            attributes = data.get("attributes", {})
-            renewal_val = attributes.get("renewal")
-            name = attributes.get("name", server_id[:8])
-            days_left = parse_renewal_days(renewal_val)
-            return {"name": name, "days_left": days_left}
-    except Exception as e:
-        print(f"  ⚠️ 获取服务器详情异常: {e}")
-    return {"name": server_id[:8], "days_left": None}
-
-
 def format_notification(status: str, label: str, server_id: str, detail: str) -> str:
     """格式化通知信息"""
     now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
@@ -184,61 +144,30 @@ def format_notification(status: str, label: str, server_id: str, detail: str) ->
 
 
 # ------------------------------------------------------------
-# 续期核心流程
+# 续期核心流程（测试模式）
 # ------------------------------------------------------------
 def renew_server(cookie: str, server_id: str) -> dict:
-    """检查剩余天数并在 <= 4 天时执行续期"""
+    """直接发起续期请求并打印原始响应"""
     cookie_dict = parse_cookies(cookie)
     headers = build_headers(cookie_dict.get("XSRF-TOKEN", ""), server_id)
 
-    # Step 0: 查询当前服务器剩余天数
-    server_info = get_server_details(cookie_dict, headers, server_id)
-    days_left = server_info["days_left"]
-    server_name = server_info["name"]
-
-    if days_left is not None:
-        display_days = int(days_left) if days_left.is_integer() else round(days_left, 1)
-        print(f"  📊 [{server_id[:8]}] 服务器名称: {server_name} | 剩余天数: {display_days} 天")
-        
-        # 判断条件：大于 3 天则跳过续期
-        if days_left > RENEW_THRESHOLD_DAYS:
-            print(f"  ⏭️ 剩余天数 ({display_days} 天) > 阈值 ({RENEW_THRESHOLD_DAYS} 天)，无需续期")
-            return {
-                "status": "skipped",
-                "message": f"剩余 {display_days} 天 (> 阈值 {RENEW_THRESHOLD_DAYS} 天，跳过)"
-            }
-        print(f"  ⚠️ 剩余天数 ({display_days} 天) <= {RENEW_THRESHOLD_DAYS} 天，开始发起续期...")
-    else:
-        print(f"  ℹ️ 未获取到剩余天数，直接尝试发起续期...")
-
     # Step 1: 发起续期请求
     begin_url = f"{BASE_URL}/api/client/servers/{server_id}/renew/begin"
-    print(f"  🔄 [{server_id[:8]}] 开始发起续期会话...")
+    print(f"  🔄 [{server_id[:8]}] Step 1: POST {begin_url}")
     try:
         resp = requests.post(begin_url, headers=headers, cookies=cookie_dict, timeout=30, proxies=PROXIES or None)
+        print(f"  📥 Step 1 HTTP 状态码: {resp.status_code}")
+        print(f"  📄 Step 1 原始响应: {resp.text[:300]}")
     except Exception as e:
-        print(f"  ❌ 请求失败: {e}")
-        return {"status": "error", "message": f"请求失败: {e}"}
+        print(f"  ❌ Step 1 请求失败: {e}")
+        return {"status": "error", "message": f"Step 1 请求失败: {e}"}
 
     if resp.status_code == 419:
-        print(f"  ❌ CSRF mismatch (419) - Cookie 已过期")
         return {"status": "error", "message": "CSRF mismatch (419) - Cookie 过期"}
     if resp.status_code == 401:
-        print(f"  ❌ 401 Unauthenticated - Cookie 已失效")
         return {"status": "error", "message": "401 Unauthenticated - Cookie 失效"}
-
     if resp.status_code != 200:
-        if "UnexpectedValueException" in resp.text or "limit" in resp.text.lower():
-            print(f"  ⏭️ 面板提示已达续期上限，跳过")
-            return {"status": "skipped", "message": "已达续期天数上限 (无需续期)"}
-        print(f"  ❌ begin 失败 HTTP {resp.status_code}: {resp.text[:200]}")
-        return {"status": "error", "message": f"begin HTTP {resp.status_code}"}
-
-    try:
-        data = resp.json()
-    except Exception:
-        print(f"  ❌ begin 响应解析失败: {resp.text[:200]}")
-        return {"status": "error", "message": "begin 响应解析失败"}
+        return {"status": "error", "message": f"Step 1 HTTP {resp.status_code}: {resp.text[:100]}"}
 
     # 更新服务端下发的新 Session 与 Token
     new_cookies = resp.cookies.get_dict()
@@ -246,49 +175,29 @@ def renew_server(cookie: str, server_id: str) -> dict:
         cookie_dict.update(new_cookies)
         if "XSRF-TOKEN" in cookie_dict:
             headers["x-xsrf-token"] = cookie_dict["XSRF-TOKEN"]
-        print(f"  🔄 Session 状态已同步更新")
+        print("  🔄 Session 状态已同步更新")
 
-    article_url = data.get("url", "")
-    dwell_seconds = data.get("dwell_seconds", 15)
-    print(f"  📰 对应文章: {article_url}")
-
-    # 等待时限并增加 3 秒缓冲
-    wait_time = dwell_seconds + 3
-    print(f"  ⏳ 等待 {wait_time} 秒（模拟阅读文章）...")
-    time.sleep(wait_time)
-
-    # Step 2: 提交完成续期
+    # Step 2: 立即提交完成续期（已取消阅读等待任务）
     complete_url = f"{BASE_URL}/api/client/renewal/complete"
+    print(f"  🔄 [{server_id[:8]}] Step 2: GET {complete_url} (已取消阅读等待)")
     try:
         resp2 = requests.get(complete_url, headers=headers, cookies=cookie_dict, timeout=30, proxies=PROXIES or None)
+        print(f"  📥 Step 2 HTTP 状态码: {resp2.status_code}")
+        print(f"  📄 Step 2 原始响应: {resp2.text[:300]}")
     except Exception as e:
-        print(f"  ❌ complete 请求失败: {e}")
-        return {"status": "error", "message": f"complete 请求失败: {e}"}
+        print(f"  ❌ Step 2 请求失败: {e}")
+        return {"status": "error", "message": f"Step 2 请求失败: {e}"}
 
     if resp2.status_code != 200:
-        if "UnexpectedValueException" in resp2.text or "limit" in resp2.text.lower():
-            print(f"  ⏭️ 服务器已达最大续期上限，跳过")
-            return {"status": "skipped", "message": "已达续期天数上限 (无需续期)"}
-        print(f"  ❌ complete 失败 HTTP {resp2.status_code}: {resp2.text[:200]}")
-        return {"status": "error", "message": f"complete HTTP {resp2.status_code}"}
+        return {"status": "error", "message": f"Step 2 HTTP {resp2.status_code}: {resp2.text[:150]}"}
 
     try:
         result = resp2.json()
     except Exception:
-        result = {}
+        result = {"raw": resp2.text}
 
-    renewed = result.get("renewed_count", 0)
-    skipped = result.get("skipped_count", 0)
-
-    if renewed > 0:
-        print(f"  ✅ 续期成功! renewed_count={renewed}")
-        return {"status": "success", "message": f"续期成功 (+{renewed})"}
-    elif skipped > 0:
-        print(f"  ⏭️ 服务器被跳过 (skipped={skipped})，已达续期上限")
-        return {"status": "skipped", "message": "服务器被跳过 (已达续期上限)"}
-    else:
-        print(f"  ✅ 续期处理完成: {result}")
-        return {"status": "success", "message": f"续期完成: {result}"}
+    print(f"  ✅ 续期接口返回: {result}")
+    return {"status": "success", "message": f"响应: {result}"}
 
 
 # ------------------------------------------------------------
@@ -296,7 +205,7 @@ def renew_server(cookie: str, server_id: str) -> dict:
 # ------------------------------------------------------------
 def main():
     print("=" * 40)
-    print(" Orihost 免费服务器自动续期")
+    print(" Orihost 免费服务器自动续期 (测试模式)")
     print("=" * 40)
 
     all_results = []
@@ -316,9 +225,7 @@ def main():
                 result = renew_server(cookie, server_id)
                 status_map = {
                     "success": "✅ 续期成功",
-                    "skipped": "⏭️ 剩余充足",
                     "error": "❌ 续期失败",
-                    "unknown": "⚠️ 未知结果",
                 }
                 info = {
                     "label": label,
@@ -327,7 +234,7 @@ def main():
                     "message": result.get("message", ""),
                 }
             except Exception as e:
-                print(f"  ❌ 服务器 {server_id} 处理失败: {e}")
+                print(f"  ❌ 处理失败: {e}")
                 info = {
                     "label": label,
                     "server_id": server_id,
@@ -349,10 +256,8 @@ def main():
     # 汇总
     success = sum(1 for r in all_results if "成功" in r["status"])
     fail = sum(1 for r in all_results if "失败" in r["status"])
-    skipped = sum(1 for r in all_results if "充足" in r["status"] or "上限" in r["status"])
-    accounts = len(set(r["label"] for r in all_results))
     print(f"\n{'=' * 40}")
-    print(f"📊 汇总: {accounts} 个账号, {success} 成功, {skipped} 跳过, {fail} 失败, 共 {len(all_results)} 个服务器")
+    print(f"📊 汇总: {len(all_results)} 个服务器, {success} 成功, {fail} 失败")
     print(f"{'=' * 40}")
 
 

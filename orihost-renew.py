@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Orihost 自动续期脚本 (Playwright 稳定静默等待 Turnstile 版)
+# Orihost 自动续期脚本 (Playwright 物理按压穿透 Turnstile 版)
 # ============================================================
 import os
 import sys
@@ -60,73 +60,84 @@ def parse_cookies_for_playwright(cookie_str: str) -> list:
 
 
 def clean_ad_overlays(page):
-    """清理遮挡点击的第三方广告弹窗"""
+    """清理遮挡点击的第三方广告弹窗与 Cookie 提示"""
     try:
         page.evaluate("""
             document.querySelectorAll('iframe:not([src*="challenges.cloudflare.com"]):not([src*="cloudflare"])').forEach(el => el.remove());
             document.querySelectorAll('ins.adsbygoogle, div[class*="ad-"], div[id*="google_ads"]').forEach(el => el.remove());
+            document.querySelectorAll('div[class*="cookie"], #cookie-banner, button:has-text("Got it")').forEach(el => el.remove());
         """)
     except Exception:
         pass
 
 
-def solve_turnstile_carefully(page, claim_btn, max_wait=25) -> bool:
-    """精准单次点击 Turnstile，并静默等待 Cloudflare 完成人机校验"""
-    print("  🛡️ 正在检测并触发 Cloudflare Turnstile 验证...")
+def solve_turnstile_smoothly(page, claim_btn, max_wait=35) -> bool:
+    """模拟物理按压点击 Turnstile 并静默等待人机校验完成"""
+    print("  🛡️ 正在定位 Cloudflare Turnstile 并触发人机验证...")
 
-    if claim_btn.first.is_enabled():
-        return True
-
-    # 1. 查找 Turnstile iframe 并执行单次精准点击
-    clicked = False
-    for _ in range(5):
-        for f in page.frames:
-            if "challenges.cloudflare.com" in f.url or "turnstile" in f.url:
-                try:
-                    fe = f.frame_element()
-                    bbox = fe.bounding_box()
-                    if bbox and bbox["width"] > 0 and bbox["height"] > 0:
-                        target_x = bbox["x"] + 32
-                        target_y = bbox["y"] + (bbox["height"] / 2)
-                        print(f"  👆 物理鼠标平滑移动并单次点击勾选框 ({target_x:.1f}, {target_y:.1f})...")
-                        page.mouse.move(target_x, target_y, steps=10)
-                        time.sleep(0.3)
-                        page.mouse.click(target_x, target_y)
-                        clicked = True
-                        break
-                except Exception:
-                    pass
-        if clicked:
+    cf_frame = None
+    for f in page.frames:
+        if "challenges.cloudflare.com" in f.url or "turnstile" in f.url:
+            cf_frame = f
             break
-        time.sleep(1)
 
-    if not clicked:
-        print("  ⚠️ 未能定位到 iframe 坐标，尝试备用区域点击...")
+    # 1. 触发物理按压点击
+    if cf_frame:
         try:
-            cf_frame = page.frame_locator("iframe[src*='challenges.cloudflare.com']").first
-            cf_frame.locator("body").click(position={"x": 32, "y": 32}, force=True, timeout=2000)
+            fe = cf_frame.frame_element()
+            bbox = fe.bounding_box()
+            if bbox and bbox["width"] > 0 and bbox["height"] > 0:
+                # 点击复选框至文本区域（X+45px，Y居中），覆盖整个 label
+                target_x = bbox["x"] + 45
+                target_y = bbox["y"] + (bbox["height"] / 2)
+                print(f"  👆 物理鼠标平滑移动并执行真实按压 ({target_x:.1f}, {target_y:.1f})...")
+                page.mouse.move(target_x, target_y, steps=8)
+                time.sleep(0.2)
+                page.mouse.down()
+                time.sleep(0.12)  # 真实物理按压停留时长
+                page.mouse.up()
+        except Exception as e:
+            print(f"  ⚠️ 物理坐标点击失败: {e}")
+
+    # 2. Frame 内部补充派发原生交互
+    if cf_frame:
+        try:
+            cf_frame.locator("label, body, input[type='checkbox']").first.click(force=True, timeout=2000)
         except Exception:
             pass
 
-    # 2. 静默等待验证通过（切勿重复点击打断计算）
-    print("  ⏳ 正在静默等待 Cloudflare 完成人机校验计算...")
+    take_shot(page, "05_1_after_trigger_click")
+
+    # 3. 静默等待验证结果（切勿高频重复点击打断计算）
+    print("  ⏳ 正在静默等待 Cloudflare 完成人机校验 (最多 35 秒)...")
     start_time = time.time()
     while time.time() - start_time < max_wait:
         if claim_btn.first.is_enabled():
-            print("  🎉 Claim Renewal 按钮已解除禁用（验证已通过）！")
+            print("  🎉 Claim Renewal 按钮已成功激活！")
             return True
 
-        # 检测是否已生成 cf-turnstile-response Token
+        # 检测隐藏的 Token 响应字段
         has_token = page.evaluate("""
             () => {
-                const el = document.querySelector('input[name="cf-turnstile-response"], input[name="cf_challenge_response"]');
-                return el && el.value && el.value.length > 10;
+                const input = document.querySelector('input[name="cf-turnstile-response"], input[name="cf_challenge_response"], [name*="turnstile"]');
+                return input && input.value && input.value.length > 20;
             }
         """)
         if has_token:
-            print("  🎉 已捕获到 Turnstile 验证 Token！")
-            time.sleep(1)
+            print("  🎉 已成功生成 Cloudflare 验证 Token！")
+            time.sleep(2)
             return True
+
+        # 检测 Frame 内部是否已显示打勾完成状态
+        if cf_frame:
+            try:
+                success_elem = cf_frame.locator("svg, #success, .success, [data-state='success']")
+                if success_elem.count() > 0 and success_elem.first.is_visible():
+                    print("  🎉 Turnstile 内部显示验证打勾成功！")
+                    time.sleep(2)
+                    return True
+            except Exception:
+                pass
 
         time.sleep(1)
 
@@ -141,14 +152,6 @@ def renew_single_server(page, context, server_id: str) -> dict:
     time.sleep(3)
     take_shot(page, f"{server_id[:8]}_01_console")
 
-    # 关闭 Cookie 提示与广告
-    try:
-        got_it = page.locator("button:has-text('Got it')")
-        if got_it.count() > 0:
-            got_it.first.click(force=True)
-            time.sleep(1)
-    except Exception:
-        pass
     clean_ad_overlays(page)
 
     if "login" in page.url.lower():
@@ -194,18 +197,25 @@ def renew_single_server(page, context, server_id: str) -> dict:
         take_shot(page, f"{server_id[:8]}_error_no_claim_btn")
         return {"status": "error", "message": "未找到 Claim Renewal 按钮"}
 
-    # 单次精准点击并静默等待验证完成
-    is_ready = solve_turnstile_carefully(page, claim_btn, max_wait=25)
+    # 触发并等待 Turnstile 验证
+    is_ready = solve_turnstile_smoothly(page, claim_btn, max_wait=35)
     take_shot(page, f"{server_id[:8]}_05_turnstile_finished")
 
-    if not is_ready:
-        take_shot(page, f"{server_id[:8]}_error_claim_still_disabled")
-        return {"status": "error", "message": "Turnstile 验证码未能在时限内激活按钮"}
-
-    # 提交续期
+    # 提交续期（附带 DOM 强制激活兜底）
     try:
-        print("  🔘 点击 Claim Renewal 提交续期...")
-        claim_btn.first.click(force=True, timeout=8000)
+        print("  🔘 提交 Claim Renewal...")
+        try:
+            claim_btn.first.click(force=True, timeout=5000)
+        except Exception:
+            page.evaluate("""
+                () => {
+                    const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Claim'));
+                    if (btn) {
+                        btn.removeAttribute('disabled');
+                        btn.click();
+                    }
+                }
+            """)
         time.sleep(4)
     except Exception as e:
         take_shot(page, f"{server_id[:8]}_error_click_claim_failed")
@@ -224,7 +234,7 @@ def renew_single_server(page, context, server_id: str) -> dict:
 
 def main():
     print("=" * 40)
-    print(" Orihost 自动续期 (Playwright 稳定验证版)")
+    print(" Orihost 自动续期 (Playwright 物理按压版)")
     print("=" * 40)
 
     cookie = os.environ.get("ORIHOST_COOKIE") or os.environ.get("ORIHOST_COOKIE_1") or ""

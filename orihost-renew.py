@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Orihost 自动续期脚本 (Playwright 物理按压穿透 Turnstile 版)
+# Orihost 自动续期脚本 (Playwright + Turnstile Token 精准对接版)
 # ============================================================
 import os
 import sys
@@ -71,77 +71,53 @@ def clean_ad_overlays(page):
         pass
 
 
-def solve_turnstile_smoothly(page, claim_btn, max_wait=35) -> bool:
-    """模拟物理按压点击 Turnstile 并静默等待人机校验完成"""
-    print("  🛡️ 正在定位 Cloudflare Turnstile 并触发人机验证...")
+def wait_and_solve_turnstile(page, max_wait=35) -> str:
+    """触发 Turnstile 勾选并获取生成的 cf-turnstile-response Token"""
+    print("  🛡️ 正在触发 Turnstile 验证并提取 Token...")
 
-    cf_frame = None
-    for f in page.frames:
-        if "challenges.cloudflare.com" in f.url or "turnstile" in f.url:
-            cf_frame = f
-            break
-
-    # 1. 触发物理按压点击
-    if cf_frame:
-        try:
-            fe = cf_frame.frame_element()
-            bbox = fe.bounding_box()
-            if bbox and bbox["width"] > 0 and bbox["height"] > 0:
-                # 点击复选框至文本区域（X+45px，Y居中），覆盖整个 label
-                target_x = bbox["x"] + 45
-                target_y = bbox["y"] + (bbox["height"] / 2)
-                print(f"  👆 物理鼠标平滑移动并执行真实按压 ({target_x:.1f}, {target_y:.1f})...")
-                page.mouse.move(target_x, target_y, steps=8)
-                time.sleep(0.2)
-                page.mouse.down()
-                time.sleep(0.12)  # 真实物理按压停留时长
-                page.mouse.up()
-        except Exception as e:
-            print(f"  ⚠️ 物理坐标点击失败: {e}")
-
-    # 2. Frame 内部补充派发原生交互
-    if cf_frame:
-        try:
-            cf_frame.locator("label, body, input[type='checkbox']").first.click(force=True, timeout=2000)
-        except Exception:
-            pass
-
-    take_shot(page, "05_1_after_trigger_click")
-
-    # 3. 静默等待验证结果（切勿高频重复点击打断计算）
-    print("  ⏳ 正在静默等待 Cloudflare 完成人机校验 (最多 35 秒)...")
     start_time = time.time()
-    while time.time() - start_time < max_wait:
-        if claim_btn.first.is_enabled():
-            print("  🎉 Claim Renewal 按钮已成功激活！")
-            return True
+    last_click_time = 0
 
-        # 检测隐藏的 Token 响应字段
-        has_token = page.evaluate("""
+    while time.time() - start_time < max_wait:
+        # 1. 检查 DOM 中是否已生成有效 Token
+        token = page.evaluate("""
             () => {
-                const input = document.querySelector('input[name="cf-turnstile-response"], input[name="cf_challenge_response"], [name*="turnstile"]');
-                return input && input.value && input.value.length > 20;
+                const el = document.querySelector('input[name="cf-turnstile-response"], input[name="cf_challenge_response"], [name*="turnstile"]');
+                return (el && el.value && el.value.length > 20) ? el.value : '';
             }
         """)
-        if has_token:
-            print("  🎉 已成功生成 Cloudflare 验证 Token！")
-            time.sleep(2)
-            return True
+        if token:
+            print(f"  🎉 成功获取 Turnstile 验证 Token (前30位): {token[:30]}...")
+            return token
 
-        # 检测 Frame 内部是否已显示打勾完成状态
-        if cf_frame:
-            try:
-                success_elem = cf_frame.locator("svg, #success, .success, [data-state='success']")
-                if success_elem.count() > 0 and success_elem.first.is_visible():
-                    print("  🎉 Turnstile 内部显示验证打勾成功！")
-                    time.sleep(2)
-                    return True
-            except Exception:
-                pass
+        # 2. 每隔 4 秒尝试一次轻微物理点击触发
+        if time.time() - last_click_time > 4:
+            last_click_time = time.time()
+            for f in page.frames:
+                if "challenges.cloudflare.com" in f.url or "turnstile" in f.url:
+                    try:
+                        fe = f.frame_element()
+                        bbox = fe.bounding_box()
+                        if bbox and bbox["width"] > 0:
+                            target_x = bbox["x"] + 35
+                            target_y = bbox["y"] + (bbox["height"] / 2)
+                            page.mouse.move(target_x, target_y, steps=5)
+                            time.sleep(0.1)
+                            page.mouse.down()
+                            time.sleep(0.1)
+                            page.mouse.up()
+                            print(f"  👆 物理点击勾选框坐标 ({target_x:.1f}, {target_y:.1f})")
+                    except Exception:
+                        pass
+
+                    try:
+                        f.locator("body, label, input[type='checkbox']").first.click(position={"x": 35, "y": 32}, force=True, timeout=1000)
+                    except Exception:
+                        pass
 
         time.sleep(1)
 
-    return claim_btn.first.is_enabled()
+    return ""
 
 
 def renew_single_server(page, context, server_id: str) -> dict:
@@ -197,44 +173,56 @@ def renew_single_server(page, context, server_id: str) -> dict:
         take_shot(page, f"{server_id[:8]}_error_no_claim_btn")
         return {"status": "error", "message": "未找到 Claim Renewal 按钮"}
 
-    # 触发并等待 Turnstile 验证
-    is_ready = solve_turnstile_smoothly(page, claim_btn, max_wait=35)
+    # 获取 Turnstile Token
+    cf_token = wait_and_solve_turnstile(page, max_wait=35)
     take_shot(page, f"{server_id[:8]}_05_turnstile_finished")
 
-    # 提交续期（附带 DOM 强制激活兜底）
+    if not cf_token and not claim_btn.first.is_enabled():
+        take_shot(page, f"{server_id[:8]}_error_turnstile_failed")
+        return {"status": "error", "message": "Turnstile 验证码未能在时限内通过"}
+
+    # 监听网络响应并提交 Claim Renewal
+    print("  🔘 提交 Claim Renewal 并监听完成接口...")
     try:
-        print("  🔘 提交 Claim Renewal...")
-        try:
-            claim_btn.first.click(force=True, timeout=5000)
-        except Exception:
-            page.evaluate("""
-                () => {
-                    const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Claim'));
-                    if (btn) {
-                        btn.removeAttribute('disabled');
-                        btn.click();
-                    }
-                }
-            """)
-        time.sleep(4)
+        with page.expect_response(lambda r: "renewal/complete" in r.url, timeout=15000) as resp_info:
+            claim_btn.first.click(force=True)
+
+        resp = resp_info.value
+        print(f"  📥 收到 renewal/complete 响应 HTTP {resp.status}")
+        resp_body = resp.text()
+        print(f"  📄 响应内容: {resp_body[:200]}")
+
+        take_shot(page, f"{server_id[:8]}_06_final_result")
+
+        if resp.status == 200:
+            return {"status": "success", "message": f"续期成功 (HTTP 200: {resp_body[:60]})"}
+        else:
+            return {"status": "error", "message": f"续期返回 HTTP {resp.status}: {resp_body[:100]}"}
+
     except Exception as e:
-        take_shot(page, f"{server_id[:8]}_error_click_claim_failed")
-        return {"status": "error", "message": f"点击 Claim 失败: {e}"}
+        # 如果监听超时，尝试直接在当前页面执行请求
+        print(f"  ⚠️ 监听超时，尝试前端注入提交: {e}")
+        if cf_token:
+            direct_res = page.evaluate(f"""
+                async () => {{
+                    const res = await fetch('{BASE_URL}/api/client/renewal/complete?cf-turnstile-response={cf_token}', {{
+                        headers: {{ 'accept': 'application/json', 'x-requested-with': 'XMLHttpRequest' }}
+                    }});
+                    return {{ status: res.status, text: await res.text() }};
+                }}
+            """)
+            print(f"  📥 直接调用返回: {direct_res}")
+            take_shot(page, f"{server_id[:8]}_06_final_result")
+            if direct_res.get("status") == 200:
+                return {"status": "success", "message": f"续期成功 (HTTP 200)"}
 
-    take_shot(page, f"{server_id[:8]}_06_final_result")
-
-    content = page.content()
-    if "success" in content.lower() or "renewed" in content.lower():
-        return {"status": "success", "message": "续期成功 (+7 天)"}
-    elif "limit" in content.lower():
-        return {"status": "skipped", "message": "已达续期上限"}
-
-    return {"status": "success", "message": "续期流程已执行完毕"}
+        take_shot(page, f"{server_id[:8]}_error_submit_failed")
+        return {"status": "error", "message": f"提交续期失败: {e}"}
 
 
 def main():
     print("=" * 40)
-    print(" Orihost 自动续期 (Playwright 物理按压版)")
+    print(" Orihost 自动续期 (Turnstile 对接版)")
     print("=" * 40)
 
     cookie = os.environ.get("ORIHOST_COOKIE") or os.environ.get("ORIHOST_COOKIE_1") or ""
@@ -279,7 +267,7 @@ def main():
             try:
                 res = renew_single_server(page, context, server_id)
                 now_str = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
-                status_icon = "✅" if res["status"] == "success" else ("⏭️" if res["status"] == "skipped" else "❌")
+                status_icon = "✅" if res["status"] == "success" else "❌"
                 msg = f"🖥 Orihost 服务器续期\n\n{status_icon} 状态: {res['message']}\n🆔 服务器: {server_id[:8]}\n⏰ 时间: {now_str}"
                 print(f"\n{msg}\n")
                 send_telegram(msg)

@@ -38,3 +38,11 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           ORIHOST_PROXY: http://127.0.0.1:1081
         run: python orihost-renew.py
+
+      - name: 📸 上传运行过程截图 (Artifact)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: orihost-screenshots
+          path: screenshots/
+          retention-days: 7

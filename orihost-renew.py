@@ -13,7 +13,7 @@ from datetime import datetime, timezone, timedelta
 # ============================================================
 BASE_URL = "https://panel.orihost.com"
 
-RENEW_THRESHOLD_DAYS = int(os.environ.get("ORIHOST_RENEW_THRESHOLD_DAYS") or 3)
+RENEW_THRESHOLD_DAYS = int(os.environ.get("ORIHOST_RENEW_THRESHOLD_DAYS") or 4)
 
 # ============================================================
 # 代理配置

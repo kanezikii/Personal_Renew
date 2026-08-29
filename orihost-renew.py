@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Orihost 自动续期脚本 (Playwright + Xvfb 穿透 Turnstile 版)
+# Orihost 自动续期脚本 (Playwright + Xvfb 穿透遮罩与验证版)
 # ============================================================
 import os
 import sys
@@ -59,22 +59,36 @@ def parse_cookies_for_playwright(cookie_str: str) -> list:
     return playwright_cookies
 
 
-def solve_turnstile_if_present(page, timeout=30):
-    """检测并模拟物理鼠标点击 Cloudflare Turnstile 验证框"""
+def clean_ad_overlays(page):
+    """清理页面中遮挡点击的第三方广告弹窗（保留 Cloudflare 验证框）"""
+    try:
+        page.evaluate("""
+            // 移除除 Cloudflare 之外的所有广告 iframe 与弹窗
+            document.querySelectorAll('iframe:not([src*="challenges.cloudflare.com"]):not([src*="cloudflare"])').forEach(el => el.remove());
+            document.querySelectorAll('ins.adsbygoogle, div[class*="ad-"], div[id*="google_ads"], div[class*="backdrop"]').forEach(el => el.remove());
+        """)
+    except Exception:
+        pass
+
+
+def solve_turnstile_if_present(page, timeout=25):
+    """检测并模拟真实物理鼠标轨迹点击 Cloudflare Turnstile 验证框"""
     print("  🛡️ 正在检测并穿透 Cloudflare Turnstile 验证...")
     start_time = time.time()
     while time.time() - start_time < timeout:
         for frame in page.frames:
             if "challenges.cloudflare.com" in frame.url:
                 try:
-                    box_elem = frame.locator("input[type='checkbox'], .ctp-checkbox-label, #challenge-stage")
-                    if box_elem.count() > 0 and box_elem.first.is_visible():
-                        bbox = box_elem.first.bounding_box()
+                    box = frame.locator("input[type='checkbox'], .ctp-checkbox-label, #challenge-stage")
+                    if box.count() > 0 and box.first.is_visible():
+                        bbox = box.first.bounding_box()
                         if bbox:
-                            # 模拟真实鼠标划动并点击
-                            page.mouse.move(bbox["x"] + bbox["width"] / 2, bbox["y"] + bbox["height"] / 2)
-                            time.sleep(0.3)
-                            page.mouse.click(bbox["x"] + bbox["width"] / 2, bbox["y"] + bbox["height"] / 2)
+                            x = bbox["x"] + bbox["width"] / 2
+                            y = bbox["y"] + bbox["height"] / 2
+                            # 模拟真实鼠标平滑划动
+                            page.mouse.move(x, y, steps=10)
+                            time.sleep(0.5)
+                            page.mouse.click(x, y)
                             print("  👆 已模拟鼠标点击 Turnstile 验证框...")
                             time.sleep(4)
                             return True
@@ -92,14 +106,15 @@ def renew_single_server(page, context, server_id: str) -> dict:
     time.sleep(3)
     take_shot(page, f"{server_id[:8]}_01_console")
 
-    # 关闭可能遮挡视线的底部 Cookie 提示
+    # 清理遮挡视线的 Cookie 提示与广告弹窗
     try:
         got_it = page.locator("button:has-text('Got it')")
-        if got_it.count() > 0 and got_it.first.is_visible():
-            got_it.first.click()
+        if got_it.count() > 0:
+            got_it.first.click(force=True)
             time.sleep(1)
     except Exception:
         pass
+    clean_ad_overlays(page)
 
     if "login" in page.url.lower():
         take_shot(page, f"{server_id[:8]}_error_login")
@@ -110,17 +125,18 @@ def renew_single_server(page, context, server_id: str) -> dict:
         take_shot(page, f"{server_id[:8]}_error_no_renew_btn")
         return {"status": "error", "message": "未找到 Renew 按钮"}
 
-    print("  🔘 点击主界面的 Renew 按钮...")
-    renew_btn.first.click()
+    print("  🔘 强制点击主界面的 Renew 按钮...")
+    # 使用 force=True 穿透任何潜在的广告遮罩层
+    renew_btn.first.click(force=True)
     time.sleep(2)
     take_shot(page, f"{server_id[:8]}_02_modal_opened")
 
-    # 点击广告文章
+    # 点击阅读广告文章
     read_article_btn = page.locator("button:has-text('Read Article'), button:has-text('阅读文章')")
     if read_article_btn.count() > 0:
         print("  📰 点击 Read Article 并监听新标签页...")
         with context.expect_page() as new_page_info:
-            read_article_btn.first.click()
+            read_article_btn.first.click(force=True)
 
         ad_page = new_page_info.value
         print(f"  🔗 广告页面已打开: {ad_page.url[:60]}...")
@@ -148,21 +164,20 @@ def renew_single_server(page, context, server_id: str) -> dict:
         take_shot(page, f"{server_id[:8]}_error_no_claim_btn")
         return {"status": "error", "message": "未找到 Claim Renewal 按钮"}
 
-    # 等待 Claim Renewal 按钮解除禁用（最多等 20 秒）
     print("  ⏳ 等待 Claim Renewal 按钮解除禁用...")
-    for _ in range(20):
+    for _ in range(15):
         if claim_btn.first.is_enabled():
             print("  ✅ Claim Renewal 按钮已激活！")
             break
         time.sleep(1)
 
     try:
-        print("  🔘 点击 Claim Renewal 提交续期...")
-        claim_btn.first.click(timeout=8000)
+        print("  🔘 提交 Claim Renewal...")
+        claim_btn.first.click(force=True, timeout=8000)
         time.sleep(4)
     except Exception as e:
         take_shot(page, f"{server_id[:8]}_error_claim_disabled")
-        return {"status": "error", "message": f"按钮未能成功激活: {e}"}
+        return {"status": "error", "message": f"按钮未能激活: {e}"}
 
     take_shot(page, f"{server_id[:8]}_06_final_result")
 
@@ -177,7 +192,7 @@ def renew_single_server(page, context, server_id: str) -> dict:
 
 def main():
     print("=" * 40)
-    print(" Orihost 自动续期 (Playwright + Xvfb 穿透版)")
+    print(" Orihost 自动续期 (Playwright 穿透版)")
     print("=" * 40)
 
     cookie = os.environ.get("ORIHOST_COOKIE") or os.environ.get("ORIHOST_COOKIE_1") or ""
@@ -191,7 +206,6 @@ def main():
     proxy_cfg = {"server": ORIHOST_PROXY} if ORIHOST_PROXY else None
 
     with sync_playwright() as p:
-        # 使用真实有头模式（配合 Xvfb）消除无头特征
         browser = p.chromium.launch(
             headless=False,
             proxy=proxy_cfg,
@@ -211,13 +225,12 @@ def main():
             timezone_id="Asia/Shanghai"
         )
 
-        # 注入反自动化检测脚本
+        # 反自动化指纹注入
         context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             window.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {}, app: {} };
         """)
 
-        # 注入 Cookie
         context.add_cookies(parse_cookies_for_playwright(cookie))
         page = context.new_page()
 

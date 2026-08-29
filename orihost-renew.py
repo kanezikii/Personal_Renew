@@ -18,7 +18,7 @@ from datetime import datetime, timezone, timedelta
 # ============================================================
 BASE_URL = "https://panel.orihost.com"
 
-# 续期阈值（单位：天）：仅当剩余天数小于该阈值时才发起续期，默认 3 天
+# 续期阈值（单位：天）：仅当剩余天数 <= 该阈值时才发起续期，默认 3 天
 RENEW_THRESHOLD_DAYS = int(os.environ.get("ORIHOST_RENEW_THRESHOLD_DAYS") or 3)
 
 # ============================================================
@@ -86,7 +86,7 @@ if not ACCOUNTS:
     print("❌ 未配置任何 Cookie，脚本终止。")
     sys.exit(1)
 
-print(f"📋 检测到 {len(ACCOUNTS)} 个账号，续期阈值: < {RENEW_THRESHOLD_DAYS} 天")
+print(f"📋 检测到 {len(ACCOUNTS)} 个账号，续期阈值: ≤ {RENEW_THRESHOLD_DAYS} 天")
 for acc in ACCOUNTS:
     print(f"   {acc['label']}: {', '.join(acc['server_ids'])}")
 
@@ -194,7 +194,7 @@ def format_notification(status: str, label: str, server_id: str, detail: str) ->
 # 续期核心流程
 # ------------------------------------------------------------
 def renew_server(cookie: str, server_id: str) -> dict:
-    """检查剩余天数并在 < 3 天时执行续期"""
+    """检查剩余天数并在 <= 3 天时执行续期"""
     cookie_dict = parse_cookies(cookie)
     headers = build_headers(cookie_dict.get("XSRF-TOKEN", ""), server_id)
 
@@ -206,13 +206,15 @@ def renew_server(cookie: str, server_id: str) -> dict:
     if days_left is not None:
         display_days = int(days_left) if days_left.is_integer() else round(days_left, 1)
         print(f"  📊 [{server_id[:8]}] 服务器名称: {server_name} | 剩余天数: {display_days} 天")
-        if days_left >= RENEW_THRESHOLD_DAYS:
-            print(f"  ⏭️ 剩余天数 ({display_days} 天) >= 阈值 ({RENEW_THRESHOLD_DAYS} 天)，无需续期")
+        
+        # 仅当剩余天数严格大于阈值时跳过（<= 阈值时继续执行续期）
+        if days_left > RENEW_THRESHOLD_DAYS:
+            print(f"  ⏭️ 剩余天数 ({display_days} 天) > 阈值 ({RENEW_THRESHOLD_DAYS} 天)，无需续期")
             return {
                 "status": "skipped",
-                "message": f"剩余 {display_days} 天 (≥ 阈值 {RENEW_THRESHOLD_DAYS} 天，跳过)"
+                "message": f"剩余 {display_days} 天 (> 阈值 {RENEW_THRESHOLD_DAYS} 天，跳过)"
             }
-        print(f"  ⚠️ 剩余天数 ({display_days} 天) < {RENEW_THRESHOLD_DAYS} 天，开始发起续期...")
+        print(f"  ⚠️ 剩余天数 ({display_days} 天) ≤ {RENEW_THRESHOLD_DAYS} 天，开始发起续期...")
     else:
         print(f"  ℹ️ 未获取到剩余天数，直接尝试发起续期...")
 

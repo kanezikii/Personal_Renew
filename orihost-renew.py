@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Orihost 自动续期脚本 (Playwright 模拟浏览器版本)
-# 支持 Cloudflare Turnstile 验证及广告跳转等待
+# Orihost 自动续期脚本 (Playwright 引擎 + 自动截图取证)
 # ============================================================
 import os
 import sys
 import time
 import requests
+from pathlib import Path
 from urllib.parse import unquote
 from datetime import datetime, timezone, timedelta
 from playwright.sync_api import sync_playwright
@@ -15,9 +15,21 @@ from playwright.sync_api import sync_playwright
 BASE_URL = "https://panel.orihost.com"
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID") or ""
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN") or ""
-
-# 代理配置
 ORIHOST_PROXY = os.environ.get("ORIHOST_PROXY") or os.environ.get("HTTP_PROXY") or ""
+
+# 创建截图保存目录
+SCREENSHOT_DIR = Path("screenshots")
+SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def take_shot(page, name: str):
+    """保存屏幕截图"""
+    try:
+        file_path = SCREENSHOT_DIR / f"{name}.png"
+        page.screenshot(path=str(file_path), full_page=True)
+        print(f"  📸 已保存截图: {file_path}")
+    except Exception as e:
+        print(f"  ⚠️ 截图失败: {e}")
 
 
 def send_telegram(message: str):
@@ -33,7 +45,7 @@ def send_telegram(message: str):
 
 
 def parse_cookies_for_playwright(cookie_str: str) -> list:
-    """将 Cookie 字符串格式化为 Playwright 所需结构"""
+    """解析 Cookie 为 Playwright 格式"""
     playwright_cookies = []
     for item in cookie_str.split(";"):
         item = item.strip()
@@ -48,19 +60,19 @@ def parse_cookies_for_playwright(cookie_str: str) -> list:
     return playwright_cookies
 
 
-def solve_turnstile_if_present(page, timeout=30):
-    """检测并点击 Cloudflare Turnstile 验证复选框"""
+def solve_turnstile_if_present(page, timeout=15):
+    """检测并尝试点击 Cloudflare Turnstile 验证复选框"""
     print("  🛡️ 检测 Cloudflare Turnstile 验证...")
     start_time = time.time()
     while time.time() - start_time < timeout:
         for frame in page.frames:
             if "challenges.cloudflare.com" in frame.url:
                 try:
-                    box = frame.locator("input[type='checkbox'], .ctp-checkbox-label, #challenge-stage")
+                    box = frame.locator("input[type='checkbox'], .ctp-checkbox-label, #challenge-stage, body")
                     if box.count() > 0:
-                        print("  👆 点击 Cloudflare 验证框...")
-                        box.first.click()
-                        time.sleep(2)
+                        print("  👆 点击 Cloudflare 验证区域...")
+                        box.first.click(force=True)
+                        time.sleep(3)
                         return True
                 except Exception:
                     pass
@@ -74,19 +86,23 @@ def renew_single_server(page, context, server_id: str) -> dict:
     print(f"\n🔄 打开服务器控制台: {target_url}")
     page.goto(target_url, wait_until="networkidle", timeout=60000)
     time.sleep(3)
+    take_shot(page, f"{server_id[:8]}_01_console")
 
-    # 检查是否登录有效
+    # 检查是否跳转到登录页
     if "login" in page.url.lower():
+        take_shot(page, f"{server_id[:8]}_error_login")
         return {"status": "error", "message": "Cookie 已失效，跳转到了登录页"}
 
     # 点击页面右下角的 Renew 按钮
     renew_btn = page.locator("button:has-text('Renew'), button:has-text('续期')")
     if renew_btn.count() == 0:
+        take_shot(page, f"{server_id[:8]}_error_no_renew_btn")
         return {"status": "error", "message": "未找到 Renew 按钮"}
 
     print("  🔘 点击主界面的 Renew 按钮...")
     renew_btn.first.click()
     time.sleep(2)
+    take_shot(page, f"{server_id[:8]}_02_modal_opened")
 
     # 检查弹窗中是否有 Read Article 按钮
     read_article_btn = page.locator("button:has-text('Read Article'), button:has-text('阅读文章')")
@@ -94,38 +110,44 @@ def renew_single_server(page, context, server_id: str) -> dict:
         print("  📰 点击 Read Article 并监听新标签页...")
         with context.expect_page() as new_page_info:
             read_article_btn.first.click()
-        
+
         ad_page = new_page_info.value
         print(f"  🔗 广告页面已打开: {ad_page.url[:60]}...")
         print("  ⏳ 正在等待 18 秒阅读倒计时...")
         time.sleep(18)
-        
+
         try:
+            take_shot(ad_page, f"{server_id[:8]}_03_ad_page")
             ad_page.close()
             print("  🔒 已关闭广告页面，返回控制台")
         except Exception:
             pass
-        
-        # 激活原控制台页面
+
         page.bring_to_front()
         time.sleep(2)
 
+    take_shot(page, f"{server_id[:8]}_04_after_ad_returned")
+
     # 尝试处理 Cloudflare Turnstile 验证
     solve_turnstile_if_present(page, timeout=15)
+    take_shot(page, f"{server_id[:8]}_05_turnstile_finished")
 
-    # 等待 Claim Renewal 按钮激活并点击
+    # 检查 Claim Renewal 按钮状态
     claim_btn = page.locator("button:has-text('Claim Renewal'), button:has-text('Claim')")
     if claim_btn.count() == 0:
+        take_shot(page, f"{server_id[:8]}_error_no_claim_btn")
         return {"status": "error", "message": "未找到 Claim Renewal 按钮"}
 
     try:
-        # 等待按钮解除禁用
-        claim_btn.first.wait_for(state="visible", timeout=10000)
-        print("  🔘 点击 Claim Renewal 提交续期...")
-        claim_btn.first.click()
+        # 等待按钮处于可用状态（最多等 10 秒）
+        print("  🔘 尝试点击 Claim Renewal 提交续期...")
+        claim_btn.first.click(timeout=10000)
         time.sleep(4)
     except Exception as e:
-        return {"status": "error", "message": f"点击 Claim 失败: {e}"}
+        take_shot(page, f"{server_id[:8]}_error_claim_disabled")
+        return {"status": "error", "message": f"按钮可能处于禁用状态 (已达天数上限或需人机验证): {e}"}
+
+    take_shot(page, f"{server_id[:8]}_06_final_result")
 
     # 检查页面反馈
     content = page.content()
@@ -139,10 +161,9 @@ def renew_single_server(page, context, server_id: str) -> dict:
 
 def main():
     print("=" * 40)
-    print(" Orihost 自动续期 (Playwright 引擎)")
+    print(" Orihost 自动续期 (Playwright 截图排查版)")
     print("=" * 40)
 
-    # 读取环境变量中的配置
     cookie = os.environ.get("ORIHOST_COOKIE") or os.environ.get("ORIHOST_COOKIE_1") or ""
     server_ids_raw = os.environ.get("ORIHOST_SERVER_IDS") or os.environ.get("ORIHOST_SERVER_IDS_1") or ""
     server_ids = [s.strip() for s in server_ids_raw.split(",") if s.strip()]
@@ -169,9 +190,7 @@ def main():
         )
 
         # 注入 Cookie
-        playwright_cookies = parse_cookies_for_playwright(cookie)
-        context.add_cookies(playwright_cookies)
-
+        context.add_cookies(parse_cookies_for_playwright(cookie))
         page = context.new_page()
 
         for server_id in server_ids:
@@ -183,6 +202,7 @@ def main():
                 print(f"\n{msg}\n")
                 send_telegram(msg)
             except Exception as e:
+                take_shot(page, f"{server_id[:8]}_fatal_exception")
                 print(f"❌ 服务器 {server_id} 执行出错: {e}")
                 send_telegram(f"🖥 Orihost 服务器续期\n\n❌ 异常: {e}\n🆔 服务器: {server_id[:8]}")
 

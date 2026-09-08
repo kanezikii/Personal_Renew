@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Orihost 自动续期脚本 (锁定复选框精准点击 + 防误触版)
+# Orihost 自动续期脚本 (解决 networkidle 超时 + Turnstile 穿透版)
 # ============================================================
 import os
 import sys
@@ -60,7 +60,7 @@ def parse_cookies_for_playwright(cookie_str: str) -> list:
 
 
 def clean_ad_overlays(page):
-    """清理遮挡点击的第三方广告与提示层"""
+    """清理遮挡点击的第三方广告弹窗与 Cookie 提示"""
     try:
         page.evaluate("""
             document.querySelectorAll('iframe:not([src*="challenges.cloudflare.com"]):not([src*="cloudflare"])').forEach(el => el.remove());
@@ -106,18 +106,12 @@ def inject_stealth_scripts(context):
     """)
 
 
-def wait_and_solve_turnstile(page, claim_btn, max_wait=40) -> str:
-    """仅在左侧复选框物理中心 (X + 28px) 点击，防止误触右侧故障排除链接"""
-    print("  🛡️ 正在等待 Turnstile 渲染并精准触发复选框...")
+def wait_and_solve_turnstile(page, claim_btn, max_retries=6) -> str:
+    """精准锁定复选框左侧核心坐标 (X + 28px)，平稳重试直至验证通过"""
+    print("  🛡️ 正在检测 Turnstile 渲染状态并触发勾选...")
 
-    # 先等待 3 秒确保 iframe 内部加载稳定
-    time.sleep(3)
-
-    start_time = time.time()
-    has_clicked = False
-
-    while time.time() - start_time < max_wait:
-        # 1. 检查 DOM 中是否已捕获 Token
+    for attempt in range(1, max_retries + 1):
+        # 1. 检查 DOM 中是否已生成有效 Token
         token = page.evaluate("""
             () => {
                 const el = document.querySelector('input[name="cf-turnstile-response"], input[name="cf_challenge_response"], [name*="turnstile"]');
@@ -125,39 +119,58 @@ def wait_and_solve_turnstile(page, claim_btn, max_wait=40) -> str:
             }
         """)
         if token:
-            print(f"  🎉 成功捕获 Turnstile 验证 Token (前30位): {token[:30]}...")
+            print(f"  🎉 成功获取 Turnstile 验证 Token: {token[:30]}...")
             return token
 
         if claim_btn.first.is_enabled():
-            print("  🎉 Claim Renewal 按钮已解除禁用！")
+            print("  🎉 Claim Renewal 按钮已成功激活！")
             return "ready"
 
-        # 2. 定位 Turnstile iframe 并仅点击复选框中心 (X + 28px)
-        if not has_clicked or (time.time() - start_time > 15 and not has_clicked):
-            for f in page.frames:
-                if "challenges.cloudflare.com" in f.url or "turnstile" in f.url:
-                    try:
-                        fe = f.frame_element()
-                        bbox = fe.bounding_box()
-                        if bbox and bbox["width"] > 0 and bbox["height"] > 0:
-                            # 严格锁定在左侧勾选框范围 (X + 28px, Y 垂直居中)
-                            target_x = bbox["x"] + 28
-                            target_y = bbox["y"] + (bbox["height"] / 2)
+        # 2. 定位 Turnstile iframe
+        cf_frame = None
+        for f in page.frames:
+            if "challenges.cloudflare.com" in f.url or "turnstile" in f.url:
+                cf_frame = f
+                break
 
-                            print(f"  👆 物理鼠标划动并点击复选框核心坐标 ({target_x:.1f}, {target_y:.1f})...")
-                            page.mouse.move(target_x - 50, target_y - 30, steps=8)
-                            time.sleep(0.15)
-                            page.mouse.move(target_x, target_y, steps=10)
-                            time.sleep(0.2)
-                            page.mouse.down()
-                            time.sleep(0.1)
-                            page.mouse.up()
-                            has_clicked = True
-                            break
-                    except Exception as e:
-                        print(f"  ⚠️ 定位点击异常: {e}")
+        if cf_frame:
+            try:
+                fe = cf_frame.frame_element()
+                bbox = fe.bounding_box()
+                if bbox and bbox["width"] > 0 and bbox["height"] > 0:
+                    target_x = bbox["x"] + 28
+                    target_y = bbox["y"] + (bbox["height"] / 2)
 
-        time.sleep(1.5)
+                    print(f"  👆 [尝试 {attempt}/{max_retries}] 模拟鼠标划动并按下复选框 ({target_x:.1f}, {target_y:.1f})...")
+                    page.mouse.move(target_x - 40, target_y - 20, steps=6)
+                    time.sleep(0.1)
+                    page.mouse.move(target_x, target_y, steps=8)
+                    time.sleep(0.15)
+                    page.mouse.down()
+                    time.sleep(0.1)
+                    page.mouse.up()
+            except Exception as e:
+                print(f"  ⚠️ 物理坐标点击异常: {e}")
+
+            try:
+                cf_frame.locator("body").click(position={"x": 28, "y": 32}, force=True, timeout=1000)
+            except Exception:
+                pass
+        else:
+            print(f"  ⏳ [尝试 {attempt}/{max_retries}] 等待 Turnstile iframe 加载完成...")
+
+        # 静默等待 4 秒供 Cloudflare 完成计算
+        for _ in range(4):
+            time.sleep(1)
+            token = page.evaluate("""
+                () => {
+                    const el = document.querySelector('input[name="cf-turnstile-response"], input[name="cf_challenge_response"], [name*="turnstile"]');
+                    return (el && el.value && el.value.length > 20) ? el.value : '';
+                }
+            """)
+            if token or claim_btn.first.is_enabled():
+                print("  🎉 验证通过，已捕获 Token！")
+                return token or "ready"
 
     return ""
 
@@ -165,8 +178,8 @@ def wait_and_solve_turnstile(page, claim_btn, max_wait=40) -> str:
 def renew_single_server(page, context, server_id: str) -> dict:
     """处理单个服务器的完整续期流程"""
     print("🌐 初始化面板首页会话...")
-    page.goto(BASE_URL, wait_until="networkidle", timeout=60000)
-    time.sleep(2)
+    page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
+    time.sleep(3)
 
     if "login" in page.url.lower():
         take_shot(page, f"{server_id[:8]}_error_login")
@@ -174,8 +187,8 @@ def renew_single_server(page, context, server_id: str) -> dict:
 
     target_url = f"{BASE_URL}/server/{server_id[:8]}"
     print(f"\n🔄 进入服务器控制台: {target_url}")
-    page.goto(target_url, wait_until="networkidle", timeout=60000)
-    time.sleep(3)
+    page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
+    time.sleep(4)
     take_shot(page, f"{server_id[:8]}_01_console")
 
     clean_ad_overlays(page)
@@ -216,7 +229,7 @@ def renew_single_server(page, context, server_id: str) -> dict:
             pass
 
         page.bring_to_front()
-        time.sleep(3)  # 给控制台留出充分时间重新加载验证码组件
+        time.sleep(3)
 
     take_shot(page, f"{server_id[:8]}_04_after_ad_returned")
 
@@ -225,8 +238,8 @@ def renew_single_server(page, context, server_id: str) -> dict:
         take_shot(page, f"{server_id[:8]}_error_no_claim_btn")
         return {"status": "error", "message": "未找到 Claim Renewal 按钮"}
 
-    # 精准点击复选框并获取 Token
-    cf_token = wait_and_solve_turnstile(page, claim_btn, max_wait=40)
+    # 稳态触发与获取 Turnstile Token
+    cf_token = wait_and_solve_turnstile(page, claim_btn, max_retries=6)
     take_shot(page, f"{server_id[:8]}_05_turnstile_finished")
 
     if not cf_token and not claim_btn.first.is_enabled():
@@ -273,7 +286,7 @@ def renew_single_server(page, context, server_id: str) -> dict:
 
 def main():
     print("=" * 40)
-    print(" Orihost 自动续期 (精准防误触版)")
+    print(" Orihost 自动续期 (解决超时版)")
     print("=" * 40)
 
     cookie = os.environ.get("ORIHOST_COOKIE") or os.environ.get("ORIHOST_COOKIE_1") or ""

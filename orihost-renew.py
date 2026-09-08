@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Orihost 自动续期脚本 (强力清广告 + 弹性阅读等待版)
+# Orihost 自动续期脚本 (Native Proxy 防检测 + 稳态握手版)
 # ============================================================
 import os
 import sys
@@ -59,63 +59,11 @@ def parse_cookies_for_playwright(cookie_str: str) -> list:
     return playwright_cookies
 
 
-def inject_stealth_and_adblock(context):
-    """注入反自动化指纹伪装与全局广告粉碎脚本"""
-    context.add_init_script("""
-        // 1. 抹除 webdriver 特征
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-
-        window.chrome = {
-            runtime: {},
-            loadTimes: function() {},
-            csi: function() {},
-            app: {}
-        };
-
-        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-        Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
-
-        // 2. 覆盖 WebGL 软渲染为物理独显
-        const getParameterOld = WebGLRenderingContext.prototype.getParameter;
-        WebGLRenderingContext.prototype.getParameter = function(parameter) {
-            if (parameter === 37445) return 'Google Inc. (NVIDIA)';
-            if (parameter === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)';
-            return getParameterOld.apply(this, [parameter]);
-        };
-
-        const getParameter2Old = WebGL2RenderingContext.prototype.getParameter;
-        WebGL2RenderingContext.prototype.getParameter = function(parameter) {
-            if (parameter === 37445) return 'Google Inc. (NVIDIA)';
-            if (parameter === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)';
-            return getParameter2Old.apply(this, [parameter]);
-        };
-
-        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
-        Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
-        Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
-
-        // 3. 高频清理第三方广告弹窗与遮罩层 (保留 Cloudflare Turnstile)
-        setInterval(() => {
-            document.querySelectorAll('iframe:not([src*="challenges.cloudflare.com"]):not([src*="turnstile"])').forEach(el => el.remove());
-            document.querySelectorAll('ins.adsbygoogle, div[class*="ad-"], div[id*="google_ads"], div[class*="backdrop"]').forEach(el => el.remove());
-            // 自动移除浮动广告弹窗
-            document.querySelectorAll('div').forEach(el => {
-                const z = window.getComputedStyle(el).zIndex;
-                if ((parseInt(z) > 1000 || z === '2147483647') && !el.querySelector('iframe[src*="cloudflare"]')) {
-                    if (el.textContent.includes('Download is ready') || el.textContent.includes('Install now')) {
-                        el.remove();
-                    }
-                }
-            });
-        }, 500);
-    """)
-
-
-def clean_ad_overlays_manual(page):
-    """手动执行一次深度 DOM 清理"""
+def clean_ad_overlays(page):
+    """清理第三方广告与提示层"""
     try:
         page.evaluate("""
-            document.querySelectorAll('iframe:not([src*="challenges.cloudflare.com"]):not([src*="cloudflare"])').forEach(el => el.remove());
+            document.querySelectorAll('iframe:not([src*="challenges.cloudflare.com"]):not([src*="turnstile"])').forEach(el => el.remove());
             document.querySelectorAll('ins.adsbygoogle, div[class*="ad-"], div[id*="google_ads"]').forEach(el => el.remove());
             document.querySelectorAll('div[class*="cookie"], #cookie-banner, button:has-text("Got it")').forEach(el => el.remove());
         """)
@@ -123,11 +71,67 @@ def clean_ad_overlays_manual(page):
         pass
 
 
-def wait_and_solve_turnstile(page, claim_btn, max_retries=6) -> str:
-    """精准锁定复选框核心坐标 (X + 28px)，平稳轮询直至通过"""
-    print("  🛡️ 正在检测 Turnstile 渲染状态并触发勾选...")
+def inject_stealth_with_native_proxy(context):
+    """使用 Proxy 深度模拟真实 Native 函数，防止 Cloudflare 检测篡改"""
+    context.add_init_script("""
+        // 1. 抹除 webdriver
+        Object.defineProperty(Navigator.prototype, 'webdriver', {
+            get: () => undefined,
+            configurable: true
+        });
+
+        // 2. 补全真实 Chrome 运行时
+        window.chrome = {
+            runtime: {
+                id: undefined,
+                connect: () => {},
+                sendMessage: () => {}
+            },
+            loadTimes: () => {},
+            csi: () => {},
+            app: {}
+        };
+
+        // 3. 构造完美的 Native 函数 ToString 代理
+        const makeNative = (fn, name) => {
+            return new Proxy(fn, {
+                get(target, prop) {
+                    if (prop === 'toString') {
+                        return () => `function ${name}() { [native code] }`;
+                    }
+                    return target[prop];
+                }
+            });
+        };
+
+        // 4. 原生代理 WebGL 渲染参数
+        const oldGetParam = WebGLRenderingContext.prototype.getParameter;
+        WebGLRenderingContext.prototype.getParameter = makeNative(function(param) {
+            if (param === 37445) return 'Google Inc. (NVIDIA)';
+            if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+            return oldGetParam.apply(this, arguments);
+        }, 'getParameter');
+
+        const oldGetParam2 = WebGL2RenderingContext.prototype.getParameter;
+        WebGL2RenderingContext.prototype.getParameter = makeNative(function(param) {
+            if (param === 37445) return 'Google Inc. (NVIDIA)';
+            if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+            return oldGetParam2.apply(this, arguments);
+        }, 'getParameter');
+
+        // 5. 模拟硬件并发与显示配置
+        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+        Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+        Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
+    """)
+
+
+def wait_and_solve_turnstile(page, claim_btn, max_retries=5) -> str:
+    """平滑鼠标划动触发 Turnstile，每次触发后给予充足验证计算时间"""
+    print("  🛡️ 正在等待 Turnstile 初始握手并触发勾选...")
 
     for attempt in range(1, max_retries + 1):
+        # 检查是否已生成有效 Token
         token = page.evaluate("""
             () => {
                 const el = document.querySelector('input[name="cf-turnstile-response"], input[name="cf_challenge_response"], [name*="turnstile"]');
@@ -153,28 +157,26 @@ def wait_and_solve_turnstile(page, claim_btn, max_retries=6) -> str:
                 fe = cf_frame.frame_element()
                 bbox = fe.bounding_box()
                 if bbox and bbox["width"] > 0 and bbox["height"] > 0:
-                    target_x = bbox["x"] + 28
+                    # 复选框中心绝对坐标 (X + 26px, Y 垂直居中)
+                    target_x = bbox["x"] + 26
                     target_y = bbox["y"] + (bbox["height"] / 2)
 
-                    print(f"  👆 [尝试 {attempt}/{max_retries}] 鼠标移动并点击复选框 ({target_x:.1f}, {target_y:.1f})...")
-                    page.mouse.move(target_x - 40, target_y - 20, steps=6)
+                    print(f"  👆 [尝试 {attempt}/{max_retries}] 拟人鼠标划动并按下复选框 ({target_x:.1f}, {target_y:.1f})...")
+                    # 模拟两段式平滑鼠标轨迹
+                    page.mouse.move(target_x - 60, target_y - 30, steps=8)
                     time.sleep(0.1)
-                    page.mouse.move(target_x, target_y, steps=8)
-                    time.sleep(0.15)
+                    page.mouse.move(target_x, target_y, steps=10)
+                    time.sleep(0.2)
                     page.mouse.down()
-                    time.sleep(0.1)
+                    time.sleep(0.12)
                     page.mouse.up()
             except Exception as e:
                 print(f"  ⚠️ 坐标点击异常: {e}")
-
-            try:
-                cf_frame.locator("body").click(position={"x": 28, "y": 32}, force=True, timeout=1000)
-            except Exception:
-                pass
         else:
-            print(f"  ⏳ [尝试 {attempt}/{max_retries}] 等待 Turnstile iframe 加载完成...")
+            print(f"  ⏳ [尝试 {attempt}/{max_retries}] 等待 Turnstile iframe 渲染...")
 
-        for _ in range(5):
+        # 每次点击后给予 6 秒静默时间供 Cloudflare 计算
+        for _ in range(6):
             time.sleep(1)
             token = page.evaluate("""
                 () => {
@@ -205,7 +207,7 @@ def renew_single_server(page, context, server_id: str) -> dict:
     time.sleep(4)
     take_shot(page, f"{server_id[:8]}_01_console")
 
-    clean_ad_overlays_manual(page)
+    clean_ad_overlays(page)
 
     if "Something went wrong" in page.content() or "could not be found" in page.content():
         take_shot(page, f"{server_id[:8]}_error_404")
@@ -221,14 +223,14 @@ def renew_single_server(page, context, server_id: str) -> dict:
     print("  🔘 点击主界面的 Renew 按钮...")
     renew_btn.first.click(force=True)
     time.sleep(2)
-    clean_ad_overlays_manual(page)
+    clean_ad_overlays(page)
     take_shot(page, f"{server_id[:8]}_02_modal_opened")
 
-    # 点击阅读广告文章（加入超时保护与容错）
+    # 点击阅读广告文章
     read_article_btn = page.locator("button:has-text('Read Article'), button:has-text('阅读文章')")
     if read_article_btn.count() > 0:
         print("  📰 点击 Read Article 并执行阅读等待...")
-        clean_ad_overlays_manual(page)
+        clean_ad_overlays(page)
         ad_page = None
         try:
             with context.expect_page(timeout=5000) as new_page_info:
@@ -236,7 +238,7 @@ def renew_single_server(page, context, server_id: str) -> dict:
             ad_page = new_page_info.value
             print(f"  🔗 广告页面已打开: {ad_page.url[:60]}...")
         except Exception:
-            print("  ℹ️ 未捕获到新标签页，直接在后台保持 18 秒阅读计时...")
+            print("  ℹ️ 未捕获到新标签页，保持 18 秒阅读倒计时...")
             read_article_btn.first.click(force=True)
 
         print("  ⏳ 正在等待 18 秒阅读倒计时...")
@@ -251,9 +253,10 @@ def renew_single_server(page, context, server_id: str) -> dict:
                 pass
 
         page.bring_to_front()
-        time.sleep(3)
+        # 切回控制台后留出 4 秒让 Turnstile 完成初始化握手
+        time.sleep(4)
 
-    clean_ad_overlays_manual(page)
+    clean_ad_overlays(page)
     take_shot(page, f"{server_id[:8]}_04_after_ad_returned")
 
     claim_btn = page.locator("button:has-text('Claim Renewal'), button:has-text('Claim')")
@@ -262,7 +265,7 @@ def renew_single_server(page, context, server_id: str) -> dict:
         return {"status": "error", "message": "未找到 Claim Renewal 按钮"}
 
     # 稳态触发与获取 Turnstile Token
-    cf_token = wait_and_solve_turnstile(page, claim_btn, max_retries=6)
+    cf_token = wait_and_solve_turnstile(page, claim_btn, max_retries=5)
     take_shot(page, f"{server_id[:8]}_05_turnstile_finished")
 
     if not cf_token and not claim_btn.first.is_enabled():
@@ -271,7 +274,7 @@ def renew_single_server(page, context, server_id: str) -> dict:
 
     # 提交续期
     print("  🔘 提交 Claim Renewal 并监听完成接口...")
-    clean_ad_overlays_manual(page)
+    clean_ad_overlays(page)
     try:
         with page.expect_response(lambda r: "renewal/complete" in r.url, timeout=15000) as resp_info:
             claim_btn.first.click(force=True)
@@ -310,7 +313,7 @@ def renew_single_server(page, context, server_id: str) -> dict:
 
 def main():
     print("=" * 40)
-    print(" Orihost 自动续期 (强力清广告版)")
+    print(" Orihost 自动续期 (Native Proxy 版)")
     print("=" * 40)
 
     cookie = os.environ.get("ORIHOST_COOKIE") or os.environ.get("ORIHOST_COOKIE_1") or ""
@@ -345,7 +348,7 @@ def main():
             timezone_id="Asia/Shanghai"
         )
 
-        inject_stealth_and_adblock(context)
+        inject_stealth_with_native_proxy(context)
         context.add_cookies(parse_cookies_for_playwright(cookie))
         page = context.new_page()
 

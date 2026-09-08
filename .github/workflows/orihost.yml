@@ -20,9 +20,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests playwright
+          pip install requests playwright playwright-stealth
           playwright install chromium --with-deps
-          sudo apt-get update && sudo apt-get install -y xvfb
+          sudo apt-get update && sudo apt-get install -y xvfb libegl1-mesa libgl1-mesa-dri
 
       - name: ⚙ 设置代理 (sing-box)
         continue-on-error: true

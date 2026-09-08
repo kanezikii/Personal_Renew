@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Orihost 自动续期脚本 (Playwright + Turnstile Token 精准对接版)
+# Orihost 自动续期脚本 (深度指纹伪装 + Turnstile 穿透版)
 # ============================================================
 import os
 import sys
@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import unquote
 from datetime import datetime, timezone, timedelta
 from playwright.sync_api import sync_playwright
+from playwright_stealth import stealth_sync
 
 BASE_URL = "https://panel.orihost.com"
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID") or ""
@@ -60,7 +61,7 @@ def parse_cookies_for_playwright(cookie_str: str) -> list:
 
 
 def clean_ad_overlays(page):
-    """清理遮挡点击的第三方广告弹窗与 Cookie 提示"""
+    """清理遮挡点击的第三方广告与提示层"""
     try:
         page.evaluate("""
             document.querySelectorAll('iframe:not([src*="challenges.cloudflare.com"]):not([src*="cloudflare"])').forEach(el => el.remove());
@@ -71,15 +72,53 @@ def clean_ad_overlays(page):
         pass
 
 
-def wait_and_solve_turnstile(page, max_wait=35) -> str:
-    """触发 Turnstile 勾选并获取生成的 cf-turnstile-response Token"""
-    print("  🛡️ 正在触发 Turnstile 验证并提取 Token...")
+def inject_stealth_scripts(context):
+    """注入高级硬件与环境指纹伪装（重写 WebGL 软渲染标记）"""
+    context.add_init_script("""
+        // 1. 隐藏 webdriver
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+        // 2. 伪造真实 Chrome 运行时与插件
+        window.chrome = {
+            runtime: {},
+            loadTimes: function() {},
+            csi: function() {},
+            app: {}
+        };
+
+        // 3. 覆盖 WebGL 渲染器（防止 llvmpipe / SwiftShader 触发风控）
+        const getParameterOld = WebGLRenderingContext.prototype.getParameter;
+        WebGLRenderingContext.prototype.getParameter = function(parameter) {
+            // UNMASKED_VENDOR_WEBGL
+            if (parameter === 37445) return 'Google Inc. (NVIDIA)';
+            // UNMASKED_RENDERER_WEBGL
+            if (parameter === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+            return getParameterOld.apply(this, [parameter]);
+        };
+
+        const getParameter2Old = WebGL2RenderingContext.prototype.getParameter;
+        WebGL2RenderingContext.prototype.getParameter = function(parameter) {
+            if (parameter === 37445) return 'Google Inc. (NVIDIA)';
+            if (parameter === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+            return getParameter2Old.apply(this, [parameter]);
+        };
+
+        // 4. 伪造硬件并发与屏幕参数
+        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+        Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+        Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
+    """)
+
+
+def wait_and_solve_turnstile(page, max_wait=40) -> str:
+    """平滑移动鼠标至 Turnstile 复选框并提取校验 Token"""
+    print("  🛡️ 正在进行 Turnstile 验证与 Token 提取...")
 
     start_time = time.time()
-    last_click_time = 0
+    clicked = False
 
     while time.time() - start_time < max_wait:
-        # 1. 检查 DOM 中是否已生成有效 Token
+        # 1. 检测是否已生成 cf-turnstile-response
         token = page.evaluate("""
             () => {
                 const el = document.querySelector('input[name="cf-turnstile-response"], input[name="cf_challenge_response"], [name*="turnstile"]');
@@ -87,31 +126,32 @@ def wait_and_solve_turnstile(page, max_wait=35) -> str:
             }
         """)
         if token:
-            print(f"  🎉 成功获取 Turnstile 验证 Token (前30位): {token[:30]}...")
+            print(f"  🎉 成功捕获 Turnstile 验证 Token (前30位): {token[:30]}...")
             return token
 
-        # 2. 每隔 4 秒尝试一次轻微物理点击触发
-        if time.time() - last_click_time > 4:
-            last_click_time = time.time()
+        # 2. 单次精准拟人鼠标移动与点击
+        if not clicked:
             for f in page.frames:
                 if "challenges.cloudflare.com" in f.url or "turnstile" in f.url:
                     try:
                         fe = f.frame_element()
                         bbox = fe.bounding_box()
-                        if bbox and bbox["width"] > 0:
+                        if bbox and bbox["width"] > 0 and bbox["height"] > 0:
+                            # 目标位置：复选框中心
                             target_x = bbox["x"] + 35
                             target_y = bbox["y"] + (bbox["height"] / 2)
-                            page.mouse.move(target_x, target_y, steps=5)
-                            time.sleep(0.1)
-                            page.mouse.down()
-                            time.sleep(0.1)
-                            page.mouse.up()
-                            print(f"  👆 物理点击勾选框坐标 ({target_x:.1f}, {target_y:.1f})")
-                    except Exception:
-                        pass
 
-                    try:
-                        f.locator("body, label, input[type='checkbox']").first.click(position={"x": 35, "y": 32}, force=True, timeout=1000)
+                            # 模拟真实鼠标轨迹移动
+                            page.mouse.move(target_x - 100, target_y - 50, steps=10)
+                            time.sleep(0.1)
+                            page.mouse.move(target_x, target_y, steps=15)
+                            time.sleep(0.3)
+                            page.mouse.down()
+                            time.sleep(0.12)
+                            page.mouse.up()
+                            print(f"  👆 已模拟真实鼠标轨迹点击坐标 ({target_x:.1f}, {target_y:.1f})")
+                            clicked = True
+                            break
                     except Exception:
                         pass
 
@@ -122,20 +162,30 @@ def wait_and_solve_turnstile(page, max_wait=35) -> str:
 
 def renew_single_server(page, context, server_id: str) -> dict:
     """处理单个服务器的完整续期流程"""
+    print("🌐 初始化面板首页会话...")
+    page.goto(BASE_URL, wait_until="networkidle", timeout=60000)
+    time.sleep(2)
+
+    if "login" in page.url.lower():
+        take_shot(page, f"{server_id[:8]}_error_login")
+        return {"status": "error", "message": "Cookie 已失效，跳转到了登录页"}
+
     target_url = f"{BASE_URL}/server/{server_id[:8]}"
-    print(f"\n🔄 打开服务器控制台: {target_url}")
+    print(f"\n🔄 进入服务器控制台: {target_url}")
     page.goto(target_url, wait_until="networkidle", timeout=60000)
     time.sleep(3)
     take_shot(page, f"{server_id[:8]}_01_console")
 
     clean_ad_overlays(page)
 
-    if "login" in page.url.lower():
-        take_shot(page, f"{server_id[:8]}_error_login")
-        return {"status": "error", "message": "Cookie 已失效，跳转到了登录页"}
+    if "Something went wrong" in page.content() or "could not be found" in page.content():
+        take_shot(page, f"{server_id[:8]}_error_404")
+        return {"status": "error", "message": "服务器加载失败 (404)"}
 
     renew_btn = page.locator("button:has-text('Renew'), button:has-text('续期')")
-    if renew_btn.count() == 0:
+    try:
+        renew_btn.first.wait_for(state="visible", timeout=15000)
+    except Exception:
         take_shot(page, f"{server_id[:8]}_error_no_renew_btn")
         return {"status": "error", "message": "未找到 Renew 按钮"}
 
@@ -144,7 +194,7 @@ def renew_single_server(page, context, server_id: str) -> dict:
     time.sleep(2)
     take_shot(page, f"{server_id[:8]}_02_modal_opened")
 
-    # 点击阅读广告文章
+    # 点击阅读广告
     read_article_btn = page.locator("button:has-text('Read Article'), button:has-text('阅读文章')")
     if read_article_btn.count() > 0:
         print("  📰 点击 Read Article 并监听新标签页...")
@@ -173,15 +223,15 @@ def renew_single_server(page, context, server_id: str) -> dict:
         take_shot(page, f"{server_id[:8]}_error_no_claim_btn")
         return {"status": "error", "message": "未找到 Claim Renewal 按钮"}
 
-    # 获取 Turnstile Token
-    cf_token = wait_and_solve_turnstile(page, max_wait=35)
+    # 等待并解决 Turnstile
+    cf_token = wait_and_solve_turnstile(page, max_wait=40)
     take_shot(page, f"{server_id[:8]}_05_turnstile_finished")
 
     if not cf_token and not claim_btn.first.is_enabled():
         take_shot(page, f"{server_id[:8]}_error_turnstile_failed")
-        return {"status": "error", "message": "Turnstile 验证码未能在时限内通过"}
+        return {"status": "error", "message": "Turnstile 验证码未通过"}
 
-    # 监听网络响应并提交 Claim Renewal
+    # 提交续期
     print("  🔘 提交 Claim Renewal 并监听完成接口...")
     try:
         with page.expect_response(lambda r: "renewal/complete" in r.url, timeout=15000) as resp_info:
@@ -200,8 +250,7 @@ def renew_single_server(page, context, server_id: str) -> dict:
             return {"status": "error", "message": f"续期返回 HTTP {resp.status}: {resp_body[:100]}"}
 
     except Exception as e:
-        # 如果监听超时，尝试直接在当前页面执行请求
-        print(f"  ⚠️ 监听超时，尝试前端注入提交: {e}")
+        print(f"  ⚠️ 监听响应超时，尝试携带 Token 直调: {e}")
         if cf_token:
             direct_res = page.evaluate(f"""
                 async () => {{
@@ -211,10 +260,10 @@ def renew_single_server(page, context, server_id: str) -> dict:
                     return {{ status: res.status, text: await res.text() }};
                 }}
             """)
-            print(f"  📥 直接调用返回: {direct_res}")
+            print(f"  📥 直调返回: {direct_res}")
             take_shot(page, f"{server_id[:8]}_06_final_result")
             if direct_res.get("status") == 200:
-                return {"status": "success", "message": f"续期成功 (HTTP 200)"}
+                return {"status": "success", "message": "续期成功 (HTTP 200)"}
 
         take_shot(page, f"{server_id[:8]}_error_submit_failed")
         return {"status": "error", "message": f"提交续期失败: {e}"}
@@ -222,7 +271,7 @@ def renew_single_server(page, context, server_id: str) -> dict:
 
 def main():
     print("=" * 40)
-    print(" Orihost 自动续期 (Turnstile 对接版)")
+    print(" Orihost 自动续期 (深度指纹伪装版)")
     print("=" * 40)
 
     cookie = os.environ.get("ORIHOST_COOKIE") or os.environ.get("ORIHOST_COOKIE_1") or ""
@@ -246,6 +295,8 @@ def main():
                 "--disable-infobars",
                 "--window-size=1920,1080",
                 "--start-maximized",
+                "--ignore-gpu-blocklist",
+                "--enable-webgl",
             ]
         )
         context = browser.new_context(
@@ -255,10 +306,9 @@ def main():
             timezone_id="Asia/Shanghai"
         )
 
-        context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            window.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {}, app: {} };
-        """)
+        # 启用 stealth 插件与指纹注入
+        stealth_sync(context)
+        inject_stealth_scripts(context)
 
         context.add_cookies(parse_cookies_for_playwright(cookie))
         page = context.new_page()

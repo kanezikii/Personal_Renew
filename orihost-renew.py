@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Orihost 自动续期脚本 (解决 networkidle 超时 + Turnstile 穿透版)
+# Orihost 自动续期脚本 (强力清广告 + 弹性阅读等待版)
 # ============================================================
 import os
 import sys
@@ -59,21 +59,10 @@ def parse_cookies_for_playwright(cookie_str: str) -> list:
     return playwright_cookies
 
 
-def clean_ad_overlays(page):
-    """清理遮挡点击的第三方广告弹窗与 Cookie 提示"""
-    try:
-        page.evaluate("""
-            document.querySelectorAll('iframe:not([src*="challenges.cloudflare.com"]):not([src*="cloudflare"])').forEach(el => el.remove());
-            document.querySelectorAll('ins.adsbygoogle, div[class*="ad-"], div[id*="google_ads"]').forEach(el => el.remove());
-            document.querySelectorAll('div[class*="cookie"], #cookie-banner, button:has-text("Got it")').forEach(el => el.remove());
-        """)
-    except Exception:
-        pass
-
-
-def inject_stealth_scripts(context):
-    """注入全套原生反自动化检测与硬件指纹伪装"""
+def inject_stealth_and_adblock(context):
+    """注入反自动化指纹伪装与全局广告粉碎脚本"""
     context.add_init_script("""
+        // 1. 抹除 webdriver 特征
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 
         window.chrome = {
@@ -86,6 +75,7 @@ def inject_stealth_scripts(context):
         Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
         Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
 
+        // 2. 覆盖 WebGL 软渲染为物理独显
         const getParameterOld = WebGLRenderingContext.prototype.getParameter;
         WebGLRenderingContext.prototype.getParameter = function(parameter) {
             if (parameter === 37445) return 'Google Inc. (NVIDIA)';
@@ -103,15 +93,41 @@ def inject_stealth_scripts(context):
         Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
         Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
         Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
+
+        // 3. 高频清理第三方广告弹窗与遮罩层 (保留 Cloudflare Turnstile)
+        setInterval(() => {
+            document.querySelectorAll('iframe:not([src*="challenges.cloudflare.com"]):not([src*="turnstile"])').forEach(el => el.remove());
+            document.querySelectorAll('ins.adsbygoogle, div[class*="ad-"], div[id*="google_ads"], div[class*="backdrop"]').forEach(el => el.remove());
+            // 自动移除浮动广告弹窗
+            document.querySelectorAll('div').forEach(el => {
+                const z = window.getComputedStyle(el).zIndex;
+                if ((parseInt(z) > 1000 || z === '2147483647') && !el.querySelector('iframe[src*="cloudflare"]')) {
+                    if (el.textContent.includes('Download is ready') || el.textContent.includes('Install now')) {
+                        el.remove();
+                    }
+                }
+            });
+        }, 500);
     """)
 
 
+def clean_ad_overlays_manual(page):
+    """手动执行一次深度 DOM 清理"""
+    try:
+        page.evaluate("""
+            document.querySelectorAll('iframe:not([src*="challenges.cloudflare.com"]):not([src*="cloudflare"])').forEach(el => el.remove());
+            document.querySelectorAll('ins.adsbygoogle, div[class*="ad-"], div[id*="google_ads"]').forEach(el => el.remove());
+            document.querySelectorAll('div[class*="cookie"], #cookie-banner, button:has-text("Got it")').forEach(el => el.remove());
+        """)
+    except Exception:
+        pass
+
+
 def wait_and_solve_turnstile(page, claim_btn, max_retries=6) -> str:
-    """精准锁定复选框左侧核心坐标 (X + 28px)，平稳重试直至验证通过"""
+    """精准锁定复选框核心坐标 (X + 28px)，平稳轮询直至通过"""
     print("  🛡️ 正在检测 Turnstile 渲染状态并触发勾选...")
 
     for attempt in range(1, max_retries + 1):
-        # 1. 检查 DOM 中是否已生成有效 Token
         token = page.evaluate("""
             () => {
                 const el = document.querySelector('input[name="cf-turnstile-response"], input[name="cf_challenge_response"], [name*="turnstile"]');
@@ -126,7 +142,6 @@ def wait_and_solve_turnstile(page, claim_btn, max_retries=6) -> str:
             print("  🎉 Claim Renewal 按钮已成功激活！")
             return "ready"
 
-        # 2. 定位 Turnstile iframe
         cf_frame = None
         for f in page.frames:
             if "challenges.cloudflare.com" in f.url or "turnstile" in f.url:
@@ -141,7 +156,7 @@ def wait_and_solve_turnstile(page, claim_btn, max_retries=6) -> str:
                     target_x = bbox["x"] + 28
                     target_y = bbox["y"] + (bbox["height"] / 2)
 
-                    print(f"  👆 [尝试 {attempt}/{max_retries}] 模拟鼠标划动并按下复选框 ({target_x:.1f}, {target_y:.1f})...")
+                    print(f"  👆 [尝试 {attempt}/{max_retries}] 鼠标移动并点击复选框 ({target_x:.1f}, {target_y:.1f})...")
                     page.mouse.move(target_x - 40, target_y - 20, steps=6)
                     time.sleep(0.1)
                     page.mouse.move(target_x, target_y, steps=8)
@@ -150,7 +165,7 @@ def wait_and_solve_turnstile(page, claim_btn, max_retries=6) -> str:
                     time.sleep(0.1)
                     page.mouse.up()
             except Exception as e:
-                print(f"  ⚠️ 物理坐标点击异常: {e}")
+                print(f"  ⚠️ 坐标点击异常: {e}")
 
             try:
                 cf_frame.locator("body").click(position={"x": 28, "y": 32}, force=True, timeout=1000)
@@ -159,8 +174,7 @@ def wait_and_solve_turnstile(page, claim_btn, max_retries=6) -> str:
         else:
             print(f"  ⏳ [尝试 {attempt}/{max_retries}] 等待 Turnstile iframe 加载完成...")
 
-        # 静默等待 4 秒供 Cloudflare 完成计算
-        for _ in range(4):
+        for _ in range(5):
             time.sleep(1)
             token = page.evaluate("""
                 () => {
@@ -191,7 +205,7 @@ def renew_single_server(page, context, server_id: str) -> dict:
     time.sleep(4)
     take_shot(page, f"{server_id[:8]}_01_console")
 
-    clean_ad_overlays(page)
+    clean_ad_overlays_manual(page)
 
     if "Something went wrong" in page.content() or "could not be found" in page.content():
         take_shot(page, f"{server_id[:8]}_error_404")
@@ -207,30 +221,39 @@ def renew_single_server(page, context, server_id: str) -> dict:
     print("  🔘 点击主界面的 Renew 按钮...")
     renew_btn.first.click(force=True)
     time.sleep(2)
+    clean_ad_overlays_manual(page)
     take_shot(page, f"{server_id[:8]}_02_modal_opened")
 
-    # 点击阅读广告文章
+    # 点击阅读广告文章（加入超时保护与容错）
     read_article_btn = page.locator("button:has-text('Read Article'), button:has-text('阅读文章')")
     if read_article_btn.count() > 0:
-        print("  📰 点击 Read Article 并监听新标签页...")
-        with context.expect_page() as new_page_info:
+        print("  📰 点击 Read Article 并执行阅读等待...")
+        clean_ad_overlays_manual(page)
+        ad_page = None
+        try:
+            with context.expect_page(timeout=5000) as new_page_info:
+                read_article_btn.first.click(force=True)
+            ad_page = new_page_info.value
+            print(f"  🔗 广告页面已打开: {ad_page.url[:60]}...")
+        except Exception:
+            print("  ℹ️ 未捕获到新标签页，直接在后台保持 18 秒阅读计时...")
             read_article_btn.first.click(force=True)
 
-        ad_page = new_page_info.value
-        print(f"  🔗 广告页面已打开: {ad_page.url[:60]}...")
         print("  ⏳ 正在等待 18 秒阅读倒计时...")
         time.sleep(18)
 
-        try:
-            take_shot(ad_page, f"{server_id[:8]}_03_ad_page")
-            ad_page.close()
-            print("  🔒 已关闭广告页面，返回控制台")
-        except Exception:
-            pass
+        if ad_page:
+            try:
+                take_shot(ad_page, f"{server_id[:8]}_03_ad_page")
+                ad_page.close()
+                print("  🔒 已关闭广告页面，返回控制台")
+            except Exception:
+                pass
 
         page.bring_to_front()
         time.sleep(3)
 
+    clean_ad_overlays_manual(page)
     take_shot(page, f"{server_id[:8]}_04_after_ad_returned")
 
     claim_btn = page.locator("button:has-text('Claim Renewal'), button:has-text('Claim')")
@@ -248,6 +271,7 @@ def renew_single_server(page, context, server_id: str) -> dict:
 
     # 提交续期
     print("  🔘 提交 Claim Renewal 并监听完成接口...")
+    clean_ad_overlays_manual(page)
     try:
         with page.expect_response(lambda r: "renewal/complete" in r.url, timeout=15000) as resp_info:
             claim_btn.first.click(force=True)
@@ -286,7 +310,7 @@ def renew_single_server(page, context, server_id: str) -> dict:
 
 def main():
     print("=" * 40)
-    print(" Orihost 自动续期 (解决超时版)")
+    print(" Orihost 自动续期 (强力清广告版)")
     print("=" * 40)
 
     cookie = os.environ.get("ORIHOST_COOKIE") or os.environ.get("ORIHOST_COOKIE_1") or ""
@@ -321,7 +345,7 @@ def main():
             timezone_id="Asia/Shanghai"
         )
 
-        inject_stealth_scripts(context)
+        inject_stealth_and_adblock(context)
         context.add_cookies(parse_cookies_for_playwright(cookie))
         page = context.new_page()
 

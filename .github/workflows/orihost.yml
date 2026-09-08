@@ -1,14 +1,14 @@
-name: Orihost Auto Renew (Playwright)
+name: Orihost Monitor & Alert
 
 on:
   schedule:
-    - cron: '0 10 */3 * *'
-  workflow_dispatch:
+    - cron: '0 10 */3 * *'  # 每天北京时间 12:00 自动运行
+  workflow_dispatch:      # 支持手动一键触发
 
 jobs:
-  renew:
+  check-servers:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v4
@@ -18,13 +18,11 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies & Google Chrome
+      - name: Install dependencies
         run: |
           pip install requests playwright
-          wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-          sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
-          sudo apt-get update && sudo apt-get install -y xvfb google-chrome-stable
-          playwright install-deps
+          playwright install chromium --with-deps
+          sudo apt-get update && sudo apt-get install -y xvfb
 
       - name: ⚙ 设置代理 (sing-box)
         continue-on-error: true
@@ -33,7 +31,7 @@ jobs:
         run: |
           bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
 
-      - name: Run Playwright Renew (with Xvfb)
+      - name: Run Server Monitor (with Xvfb)
         env:
           ORIHOST_COOKIE: ${{ secrets.ORIHOST_COOKIE }}
           ORIHOST_SERVER_IDS: ${{ vars.ORIHOST_SERVER_IDS }}
@@ -42,10 +40,10 @@ jobs:
           ORIHOST_PROXY: http://127.0.0.1:1081
         run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python orihost-renew.py
 
-      - name: 📸 上传运行过程截图 (Artifact)
+      - name: 📸 上传监控截图 (Artifact)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: orihost-screenshots
+          name: orihost-status-screenshots
           path: screenshots/
           retention-days: 7

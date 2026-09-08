@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Orihost 自动续期脚本 (原生反指纹注入 + Turnstile 穿透版)
+# Orihost 自动续期脚本 (多点命中 + 动态重试 Turnstile 穿透版)
 # ============================================================
 import os
 import sys
@@ -74,10 +74,8 @@ def clean_ad_overlays(page):
 def inject_stealth_scripts(context):
     """注入全套原生反自动化检测与硬件指纹伪装"""
     context.add_init_script("""
-        // 1. 抹除 webdriver 特征
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 
-        // 2. 模拟真实 Chrome 运行时与对象
         window.chrome = {
             runtime: {},
             loadTimes: function() {},
@@ -85,15 +83,9 @@ def inject_stealth_scripts(context):
             app: {}
         };
 
-        // 3. 模拟插件列表
-        Object.defineProperty(navigator, 'plugins', {
-            get: () => [1, 2, 3, 4, 5],
-        });
-        Object.defineProperty(navigator, 'languages', {
-            get: () => ['zh-CN', 'zh', 'en'],
-        });
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+        Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
 
-        // 4. 覆盖 WebGL 软渲染指纹为独立显卡
         const getParameterOld = WebGLRenderingContext.prototype.getParameter;
         WebGLRenderingContext.prototype.getParameter = function(parameter) {
             if (parameter === 37445) return 'Google Inc. (NVIDIA)';
@@ -108,22 +100,21 @@ def inject_stealth_scripts(context):
             return getParameter2Old.apply(this, [parameter]);
         };
 
-        // 5. 模拟硬件并发与显示配置
         Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
         Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
         Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
     """)
 
 
-def wait_and_solve_turnstile(page, max_wait=40) -> str:
-    """平滑移动鼠标至 Turnstile 复选框并提取校验 Token"""
-    print("  🛡️ 正在进行 Turnstile 验证与 Token 提取...")
+def wait_and_solve_turnstile(page, claim_btn, max_wait=45) -> str:
+    """多点位动态重试点击 Turnstile 并提取生成的 Token"""
+    print("  🛡️ 正在进行 Turnstile 动态穿透与 Token 提取...")
 
     start_time = time.time()
-    clicked = False
+    attempt = 0
 
     while time.time() - start_time < max_wait:
-        # 1. 检测是否已生成 cf-turnstile-response
+        # 1. 检查 DOM 中是否已生成有效 Token
         token = page.evaluate("""
             () => {
                 const el = document.querySelector('input[name="cf-turnstile-response"], input[name="cf_challenge_response"], [name*="turnstile"]');
@@ -131,34 +122,50 @@ def wait_and_solve_turnstile(page, max_wait=40) -> str:
             }
         """)
         if token:
-            print(f"  🎉 成功捕获 Turnstile 验证 Token (前30位): {token[:30]}...")
+            print(f"  🎉 成功获取 Turnstile 验证 Token: {token[:30]}...")
             return token
 
-        # 2. 单次物理鼠标平滑移动与按压
-        if not clicked:
-            for f in page.frames:
-                if "challenges.cloudflare.com" in f.url or "turnstile" in f.url:
-                    try:
-                        fe = f.frame_element()
-                        bbox = fe.bounding_box()
-                        if bbox and bbox["width"] > 0 and bbox["height"] > 0:
-                            target_x = bbox["x"] + 35
-                            target_y = bbox["y"] + (bbox["height"] / 2)
+        if claim_btn.first.is_enabled():
+            print("  🎉 Claim Renewal 按钮已解除禁用！")
+            return "ready"
 
-                            page.mouse.move(target_x - 100, target_y - 50, steps=10)
-                            time.sleep(0.1)
-                            page.mouse.move(target_x, target_y, steps=15)
-                            time.sleep(0.3)
-                            page.mouse.down()
-                            time.sleep(0.12)
-                            page.mouse.up()
-                            print(f"  👆 已模拟真实鼠标轨迹点击坐标 ({target_x:.1f}, {target_y:.1f})")
-                            clicked = True
-                            break
-                    except Exception:
-                        pass
+        # 2. 寻找 Turnstile iframe 并执行轮询点击
+        cf_frame = None
+        for f in page.frames:
+            if "challenges.cloudflare.com" in f.url or "turnstile" in f.url:
+                cf_frame = f
+                break
 
-        time.sleep(1)
+        if cf_frame:
+            try:
+                fe = cf_frame.frame_element()
+                bbox = fe.bounding_box()
+                if bbox and bbox["width"] > 0 and bbox["height"] > 0:
+                    attempt += 1
+                    # 轮流切换点击点：点1为复选框(X+32)，点2为文字区(X+75)，点3为中心区(X+110)
+                    offsets = [75, 32, 110]
+                    cur_offset = offsets[(attempt - 1) % len(offsets)]
+
+                    target_x = bbox["x"] + cur_offset
+                    target_y = bbox["y"] + (bbox["height"] / 2)
+
+                    print(f"  👆 [尝试 {attempt}] 鼠标移动并点击区域 (X+{cur_offset}px -> {target_x:.1f}, {target_y:.1f})...")
+                    page.mouse.move(target_x, target_y, steps=8)
+                    time.sleep(0.15)
+                    page.mouse.down()
+                    time.sleep(0.1)
+                    page.mouse.up()
+            except Exception as e:
+                print(f"  ⚠️ 坐标点击异常: {e}")
+
+            # 补充 Frame 内部兜底点击
+            try:
+                cf_frame.locator("body").click(position={"x": 75, "y": 32}, force=True, timeout=1000)
+            except Exception:
+                pass
+
+        # 每次点击后静默等待 3.5 秒供 Cloudflare 计算
+        time.sleep(3.5)
 
     return ""
 
@@ -226,8 +233,8 @@ def renew_single_server(page, context, server_id: str) -> dict:
         take_shot(page, f"{server_id[:8]}_error_no_claim_btn")
         return {"status": "error", "message": "未找到 Claim Renewal 按钮"}
 
-    # 等待并提取 Turnstile Token
-    cf_token = wait_and_solve_turnstile(page, max_wait=40)
+    # 多点重试 Turnstile 验证
+    cf_token = wait_and_solve_turnstile(page, claim_btn, max_wait=45)
     take_shot(page, f"{server_id[:8]}_05_turnstile_finished")
 
     if not cf_token and not claim_btn.first.is_enabled():
@@ -254,7 +261,7 @@ def renew_single_server(page, context, server_id: str) -> dict:
 
     except Exception as e:
         print(f"  ⚠️ 监听响应超时，尝试携带 Token 直调: {e}")
-        if cf_token:
+        if cf_token and cf_token != "ready":
             direct_res = page.evaluate(f"""
                 async () => {{
                     const res = await fetch('{BASE_URL}/api/client/renewal/complete?cf-turnstile-response={cf_token}', {{
@@ -274,7 +281,7 @@ def renew_single_server(page, context, server_id: str) -> dict:
 
 def main():
     print("=" * 40)
-    print(" Orihost 自动续期 (原生反指纹版)")
+    print(" Orihost 自动续期 (多点命中 Turnstile 版)")
     print("=" * 40)
 
     cookie = os.environ.get("ORIHOST_COOKIE") or os.environ.get("ORIHOST_COOKIE_1") or ""
@@ -309,9 +316,7 @@ def main():
             timezone_id="Asia/Shanghai"
         )
 
-        # 注入原生指纹反检测脚本
         inject_stealth_scripts(context)
-
         context.add_cookies(parse_cookies_for_playwright(cookie))
         page = context.new_page()
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Orihost 自动续期脚本 (深度指纹伪装 + Turnstile 穿透版)
+# Orihost 自动续期脚本 (原生反指纹注入 + Turnstile 穿透版)
 # ============================================================
 import os
 import sys
@@ -11,7 +11,6 @@ from pathlib import Path
 from urllib.parse import unquote
 from datetime import datetime, timezone, timedelta
 from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync
 
 BASE_URL = "https://panel.orihost.com"
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID") or ""
@@ -73,12 +72,12 @@ def clean_ad_overlays(page):
 
 
 def inject_stealth_scripts(context):
-    """注入高级硬件与环境指纹伪装（重写 WebGL 软渲染标记）"""
+    """注入全套原生反自动化检测与硬件指纹伪装"""
     context.add_init_script("""
-        // 1. 隐藏 webdriver
+        // 1. 抹除 webdriver 特征
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 
-        // 2. 伪造真实 Chrome 运行时与插件
+        // 2. 模拟真实 Chrome 运行时与对象
         window.chrome = {
             runtime: {},
             loadTimes: function() {},
@@ -86,12 +85,18 @@ def inject_stealth_scripts(context):
             app: {}
         };
 
-        // 3. 覆盖 WebGL 渲染器（防止 llvmpipe / SwiftShader 触发风控）
+        // 3. 模拟插件列表
+        Object.defineProperty(navigator, 'plugins', {
+            get: () => [1, 2, 3, 4, 5],
+        });
+        Object.defineProperty(navigator, 'languages', {
+            get: () => ['zh-CN', 'zh', 'en'],
+        });
+
+        // 4. 覆盖 WebGL 软渲染指纹为独立显卡
         const getParameterOld = WebGLRenderingContext.prototype.getParameter;
         WebGLRenderingContext.prototype.getParameter = function(parameter) {
-            // UNMASKED_VENDOR_WEBGL
             if (parameter === 37445) return 'Google Inc. (NVIDIA)';
-            // UNMASKED_RENDERER_WEBGL
             if (parameter === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)';
             return getParameterOld.apply(this, [parameter]);
         };
@@ -103,7 +108,7 @@ def inject_stealth_scripts(context):
             return getParameter2Old.apply(this, [parameter]);
         };
 
-        // 4. 伪造硬件并发与屏幕参数
+        // 5. 模拟硬件并发与显示配置
         Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
         Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
         Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
@@ -129,7 +134,7 @@ def wait_and_solve_turnstile(page, max_wait=40) -> str:
             print(f"  🎉 成功捕获 Turnstile 验证 Token (前30位): {token[:30]}...")
             return token
 
-        # 2. 单次精准拟人鼠标移动与点击
+        # 2. 单次物理鼠标平滑移动与按压
         if not clicked:
             for f in page.frames:
                 if "challenges.cloudflare.com" in f.url or "turnstile" in f.url:
@@ -137,11 +142,9 @@ def wait_and_solve_turnstile(page, max_wait=40) -> str:
                         fe = f.frame_element()
                         bbox = fe.bounding_box()
                         if bbox and bbox["width"] > 0 and bbox["height"] > 0:
-                            # 目标位置：复选框中心
                             target_x = bbox["x"] + 35
                             target_y = bbox["y"] + (bbox["height"] / 2)
 
-                            # 模拟真实鼠标轨迹移动
                             page.mouse.move(target_x - 100, target_y - 50, steps=10)
                             time.sleep(0.1)
                             page.mouse.move(target_x, target_y, steps=15)
@@ -194,7 +197,7 @@ def renew_single_server(page, context, server_id: str) -> dict:
     time.sleep(2)
     take_shot(page, f"{server_id[:8]}_02_modal_opened")
 
-    # 点击阅读广告
+    # 点击阅读广告文章
     read_article_btn = page.locator("button:has-text('Read Article'), button:has-text('阅读文章')")
     if read_article_btn.count() > 0:
         print("  📰 点击 Read Article 并监听新标签页...")
@@ -223,7 +226,7 @@ def renew_single_server(page, context, server_id: str) -> dict:
         take_shot(page, f"{server_id[:8]}_error_no_claim_btn")
         return {"status": "error", "message": "未找到 Claim Renewal 按钮"}
 
-    # 等待并解决 Turnstile
+    # 等待并提取 Turnstile Token
     cf_token = wait_and_solve_turnstile(page, max_wait=40)
     take_shot(page, f"{server_id[:8]}_05_turnstile_finished")
 
@@ -271,7 +274,7 @@ def renew_single_server(page, context, server_id: str) -> dict:
 
 def main():
     print("=" * 40)
-    print(" Orihost 自动续期 (深度指纹伪装版)")
+    print(" Orihost 自动续期 (原生反指纹版)")
     print("=" * 40)
 
     cookie = os.environ.get("ORIHOST_COOKIE") or os.environ.get("ORIHOST_COOKIE_1") or ""
@@ -306,8 +309,7 @@ def main():
             timezone_id="Asia/Shanghai"
         )
 
-        # 启用 stealth 插件与指纹注入
-        stealth_sync(context)
+        # 注入原生指纹反检测脚本
         inject_stealth_scripts(context)
 
         context.add_cookies(parse_cookies_for_playwright(cookie))

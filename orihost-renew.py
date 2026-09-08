@@ -329,6 +329,7 @@ def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=False,
+            channel="chrome",  # 切换为官方真实的 Google Chrome 核心
             proxy=proxy_cfg,
             args=[
                 "--no-sandbox",
@@ -337,8 +338,6 @@ def main():
                 "--disable-infobars",
                 "--window-size=1920,1080",
                 "--start-maximized",
-                "--ignore-gpu-blocklist",
-                "--enable-webgl",
             ]
         )
         context = browser.new_context(

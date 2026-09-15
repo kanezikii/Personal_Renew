@@ -1,7 +1,7 @@
 {
   "name": "lunafy-auto-renew",
   "version": "1.0.0",
-  "description": "Lunafy panel auto renew script",
+  "description": "Lunafy panel auto renew script with multi-protocol proxy support",
   "main": "renew.js",
   "scripts": {
     "start": "node renew.js"

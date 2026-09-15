@@ -287,6 +287,26 @@ async function setupProxyBridge() {
   return { server: `socks5://127.0.0.1:${LOCAL_SOCKS_PORT}` };
 }
 
+// 自动识别并处理 Cloudflare Turnstile 验证
+async function handleCloudflareTurnstile(page) {
+  try {
+    const turnstileIframe = page.locator('iframe[src*="cloudflare.com"], iframe[src*="turnstile"]').first();
+    if (await turnstileIframe.isVisible({ timeout: 4000 }).catch(() => false)) {
+      console.log('[Turnstile] Cloudflare challenge detected! Attempting verification...');
+      await page.waitForTimeout(2000);
+      const frame = page.frameLocator('iframe[src*="cloudflare.com"], iframe[src*="turnstile"]').first();
+      const checkbox = frame.locator('input[type="checkbox"], .ctp-checkbox-label, #challenge-stage').first();
+      if (await checkbox.isVisible({ timeout: 5000 }).catch(() => false)) {
+        console.log('[Turnstile] Clicking challenge checkbox...');
+        await checkbox.click();
+        await page.waitForTimeout(4000);
+      }
+    }
+  } catch (e) {
+    // 忽略未出现或自动通过的情况
+  }
+}
+
 (async () => {
   if (!DISCORD_TOKEN) {
     console.error('Error: DISCORD_TOKEN secret is required.');
@@ -312,12 +332,22 @@ async function setupProxyBridge() {
   const browser = await chromium.launch({
     headless: true,
     proxy: proxy,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled'],
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-blink-features=AutomationControlled',
+      '--disable-web-security',
+    ],
   });
 
   const context = await browser.newContext({
     viewport: { width: 1366, height: 768 },
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  });
+
+  // 注入反反爬属性
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   });
 
   const page = await context.newPage();
@@ -338,47 +368,47 @@ async function setupProxyBridge() {
     await page.waitForTimeout(3000);
     console.log(`[Step 1] Discord current URL: ${page.url()}`);
 
-    // 步骤 2：访问 Lunafy 首页（修正路由，直接访问根路径）
-    console.log('[Step 2] Navigating to Lunafy Panel Home...');
-    await page.goto('https://panel.lunafy.run/', { waitUntil: 'networkidle', timeout: 45000 });
+    // 步骤 2：访问 Lunafy 首页（使用 domcontentloaded 规避网络挂起）
+    console.log('[Step 2] Navigating to Lunafy Panel...');
+    await page.goto('https://panel.lunafy.run/', { waitUntil: 'domcontentloaded', timeout: 45000 });
     await page.waitForTimeout(3000);
 
-    // 检查是否有未授权/登录按钮
+    // 检查并自动点击 Cloudflare 验证盾
+    await handleCloudflareTurnstile(page);
+
+    // 步骤 2.1：点击 Discord 登录按钮
     const discordLoginBtn = page.locator('a[href*="discord"], button:has-text("Discord"), a:has-text("Discord")').first();
-    if (await discordLoginBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+    if (await discordLoginBtn.isVisible({ timeout: 6000 }).catch(() => false)) {
       console.log('[Step 2.1] Found Discord login button. Clicking...');
       await discordLoginBtn.click();
       await page.waitForTimeout(4000);
     }
 
-    // 步骤 3：处理 Discord OAuth2 授权
+    // 步骤 3：处理 Discord OAuth2 授权确认
     if (page.url().includes('discord.com/oauth2') || page.url().includes('discord.com')) {
       console.log('[Step 2.2] On Discord OAuth page, looking for Authorize button...');
       await page.waitForTimeout(2000);
       const authBtn = page.locator('button[type="submit"]:has-text("Authorize"), button:has-text("授权"), button:has-text("Authorize")').last();
-      if (await authBtn.isVisible({ timeout: 10000 }).catch(() => false)) {
-        console.log('[Step 2.3] Clicking Authorize...');
+      if (await authBtn.isVisible({ timeout: 12000 }).catch(() => false)) {
+        console.log('[Step 2.3] Clicking Discord Authorize button...');
         await authBtn.click();
-        await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+        await page.waitForTimeout(5000);
       }
     }
 
-    // 确保回到首页面板
-    if (!page.url().includes('panel.lunafy.run')) {
-      console.log('[Step 2.4] Redirecting to panel home...');
-      await page.goto('https://panel.lunafy.run/', { waitUntil: 'networkidle', timeout: 45000 });
-    }
+    // 再次检查如果进入首页有 Cloudflare 盾则处理
+    await handleCloudflareTurnstile(page);
 
-    // 步骤 4：等待服务器状态卡片加载
-    console.log('[Step 3] Waiting for Server Status widget on Dashboard...');
-    const cardLocator = page.locator('section.lunafy-server-status, section[class*="lunafy-server-status"]').first();
+    // 步骤 4：等待仪表盘加载
+    console.log('[Step 3] Waiting for Server Status widget...');
+    const cardLocator = page.locator('section.lunafy-server-status, section[class*="lunafy-server-status"], [class*="server-status"]').first();
     await cardLocator.waitFor({ state: 'visible', timeout: 35000 });
 
     // 提取状态与时间
     const statusText = await page.locator('section[class*="lunafy-server-status"] .fi-badge, [class*="status__heading"]').innerText().catch(() => 'Active');
     const datesText = await page.locator('.lunafy-server-status__dates, [class*="status__dates"]').innerText().catch(() => 'Dates not found');
     
-    // 检查续期按钮状态
+    // 检查续期操作区
     const actionElement = page.locator('.lunafy-server-status__action, [class*="status__action"]').first();
     const actionText = (await actionElement.innerText().catch(() => 'Unavailable')).trim();
 
@@ -390,12 +420,12 @@ async function setupProxyBridge() {
 
     let renewResult = 'No action needed';
 
-    // 检查是否存在可点击续期按钮
+    // 判断并执行续期操作
     const renewBtn = actionElement.locator('button, a').first();
     const canRenew = (await renewBtn.isVisible().catch(() => false)) && !actionText.toLowerCase().includes('unavailable');
 
     if (canRenew) {
-      console.log('[Step 4] Renewal available! Triggering renewal...');
+      console.log('[Step 4] Renewal button is active! Triggering renewal...');
       await renewBtn.click();
       await page.waitForTimeout(5000);
       renewResult = 'Renewal Triggered Successfully';

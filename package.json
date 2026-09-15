@@ -1,0 +1,14 @@
+{
+  "name": "lunafy-auto-renew",
+  "version": "1.0.0",
+  "description": "Lunafy panel auto renew script",
+  "main": "renew.js",
+  "scripts": {
+    "start": "node renew.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "playwright": "^1.50.1"
+  }
+}

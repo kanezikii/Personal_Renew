@@ -3,7 +3,7 @@ name: Lunafy Auto Renew
 on:
   schedule:
     # 每天 UTC 0点、6点、12点、18点执行 (每 6 小时检查一次)
-    - cron: '0 0,6,12,18 * * *'
+    - cron: '0 14 */2 * *'
   workflow_dispatch: # 支持手动点击 Run workflow 测试
 
 # 赋予删除工作流运行记录和缓存的写权限

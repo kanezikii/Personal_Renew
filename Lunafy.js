@@ -14,7 +14,7 @@ const TG_CHAT_ID = process.env.TG_CHAT_ID;
 const LOCAL_SOCKS_PORT = 10808;
 let singboxProcess = null;
 
-// 发送 Telegram 文本通知
+// 发送 Telegram 纯文本通知
 async function sendNotification(text) {
   if (!TG_BOT_TOKEN || !TG_CHAT_ID) return;
   try {
@@ -23,27 +23,9 @@ async function sendNotification(text) {
       text: text,
       parse_mode: 'Markdown',
     });
-    console.log('[Notification] Telegram text message sent.');
+    console.log('[通知] Telegram 文本通知已发送');
   } catch (err) {
-    console.error('[Notification] Failed to send Telegram message:', err.message);
-  }
-}
-
-// 发送 Telegram 图片及详情
-async function sendTelegramPhoto(imagePath, caption) {
-  if (!TG_BOT_TOKEN || !TG_CHAT_ID || !fs.existsSync(imagePath)) return;
-  try {
-    const fileBuffer = fs.readFileSync(imagePath);
-    const formData = new FormData();
-    formData.append('chat_id', TG_CHAT_ID);
-    formData.append('caption', caption);
-    formData.append('parse_mode', 'Markdown');
-    formData.append('photo', new Blob([fileBuffer]), 'status.png');
-
-    await axios.post(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto`, formData);
-    console.log('[Notification] Telegram status photo sent.');
-  } catch (err) {
-    console.error('[Notification] Failed to send TG photo:', err.message);
+    console.error('[通知] 发送 Telegram 消息失败:', err.message);
   }
 }
 
@@ -190,12 +172,12 @@ function parseNodeToOutbound(nodeUri) {
     return outbound;
   }
 
-  throw new Error(`Unsupported node URI protocol: ${uri.slice(0, 15)}...`);
+  throw new Error(`不支持的节点协议: ${uri.slice(0, 15)}...`);
 }
 
-// 节点连通性检测函数
+// 节点连通性检测
 async function testProxyConnectivity(proxyUrl) {
-  console.log('\n================ Proxy Connectivity Test ================');
+  console.log('\n================ 节点连通性检测 ================');
   const startTime = Date.now();
   let testCmd = `curl -s -m 10 https://api.ip.sb/geoip`;
 
@@ -210,33 +192,33 @@ async function testProxyConnectivity(proxyUrl) {
     const data = JSON.parse(res);
     
     const info = {
-      status: 'Connected (Online)',
-      ip: data.ip || 'Unknown',
-      country: data.country || data.country_code || 'Unknown',
-      isp: data.isp || data.organization || 'Unknown',
+      status: '连接正常 (在线)',
+      ip: data.ip || '未知',
+      country: data.country || data.country_code || '未知',
+      isp: data.isp || data.organization || '未知',
       latency: `${latency}ms`
     };
 
-    console.log(`[Proxy Test] Status: ${info.status}`);
-    console.log(`[Proxy Test] Outbound IP: ${info.ip}`);
-    console.log(`[Proxy Test] Location: ${info.country} (${info.isp})`);
-    console.log(`[Proxy Test] Latency: ${info.latency}`);
-    console.log('=========================================================\n');
+    console.log(`[节点状态] ${info.status}`);
+    console.log(`[出口 IP] ${info.ip}`);
+    console.log(`[归属地] ${info.country} (${info.isp})`);
+    console.log(`[延迟] ${info.latency}`);
+    console.log('================================================\n');
     return info;
   } catch (err) {
-    console.error(`[Proxy Test] Failed: Node unreachable or connection timed out (${err.message})`);
-    console.log('=========================================================\n');
+    console.error(`[节点状态] 连接失败: 节点离线或连接超时 (${err.message})`);
+    console.log('================================================\n');
     return {
-      status: 'Failed (Offline)',
+      status: '连接失败 (离线)',
       ip: 'N/A',
       country: 'N/A',
       isp: 'N/A',
-      latency: 'Timeout'
+      latency: '超时'
     };
   }
 }
 
-// 启动代理转发服务
+// 启动代理桥接服务
 async function setupProxyBridge() {
   if (!PROXY_NODE) return undefined;
 
@@ -248,7 +230,7 @@ async function setupProxyBridge() {
     return cfg;
   }
 
-  console.log('[Proxy Bridge] Parsing multi-protocol node...');
+  console.log('[代理适配] 正在解析多协议节点配置...');
   const outboundConfig = parseNodeToOutbound(PROXY_NODE);
 
   const binDir = path.join(__dirname, '.singbox');
@@ -256,7 +238,7 @@ async function setupProxyBridge() {
 
   const singboxPath = path.join(binDir, 'sing-box');
   if (!fs.existsSync(singboxPath)) {
-    console.log('[Proxy Bridge] Downloading Sing-box core...');
+    console.log('[代理适配] 正在下载 Sing-box 内核...');
     const arch = os.arch() === 'arm64' ? 'arm64' : 'amd64';
     const coreUrl = `https://github.com/SagerNet/sing-box/releases/download/v1.10.7/sing-box-1.10.7-linux-${arch}.tar.gz`;
     execSync(`curl -sL "${coreUrl}" | tar -xz -C "${binDir}" --strip-components=1`);
@@ -280,36 +262,33 @@ async function setupProxyBridge() {
   const configPath = path.join(binDir, 'config.json');
   fs.writeFileSync(configPath, JSON.stringify(singboxConfig, null, 2));
 
-  console.log(`[Proxy Bridge] Starting local SOCKS5 proxy on 127.0.0.1:${LOCAL_SOCKS_PORT}...`);
+  console.log(`[代理适配] 本地代理通道已启动: 127.0.0.1:${LOCAL_SOCKS_PORT}`);
   singboxProcess = spawn(singboxPath, ['run', '-c', configPath], { stdio: 'ignore' });
 
   await new Promise((resolve) => setTimeout(resolve, 3000));
   return { server: `socks5://127.0.0.1:${LOCAL_SOCKS_PORT}` };
 }
 
-// 自动识别并处理 Cloudflare Turnstile 验证
+// 自动识别并处理 Cloudflare 质询
 async function handleCloudflareTurnstile(page) {
   try {
     const turnstileIframe = page.locator('iframe[src*="cloudflare.com"], iframe[src*="turnstile"]').first();
-    if (await turnstileIframe.isVisible({ timeout: 4000 }).catch(() => false)) {
-      console.log('[Turnstile] Cloudflare challenge detected! Attempting verification...');
+    if (await turnstileIframe.isVisible({ timeout: 3000 }).catch(() => false)) {
+      console.log('[防护绕过] 检测到 Cloudflare 验证盾，正在尝试点击...');
       await page.waitForTimeout(2000);
       const frame = page.frameLocator('iframe[src*="cloudflare.com"], iframe[src*="turnstile"]').first();
       const checkbox = frame.locator('input[type="checkbox"], .ctp-checkbox-label, #challenge-stage').first();
-      if (await checkbox.isVisible({ timeout: 5000 }).catch(() => false)) {
-        console.log('[Turnstile] Clicking challenge checkbox...');
+      if (await checkbox.isVisible({ timeout: 4000 }).catch(() => false)) {
         await checkbox.click();
-        await page.waitForTimeout(4000);
+        await page.waitForTimeout(3000);
       }
     }
-  } catch (e) {
-    // 忽略未出现或自动通过的情况
-  }
+  } catch (e) {}
 }
 
 (async () => {
   if (!DISCORD_TOKEN) {
-    console.error('Error: DISCORD_TOKEN secret is required.');
+    console.error('错误: 缺少 DISCORD_TOKEN 变量');
     process.exit(1);
   }
 
@@ -320,12 +299,12 @@ async function handleCloudflareTurnstile(page) {
     proxy = await setupProxyBridge();
     proxyInfo = await testProxyConnectivity(proxy ? proxy.server : undefined);
     
-    if (proxy && proxyInfo.status.includes('Failed')) {
-      throw new Error(`Proxy node test failed. Node is offline or blocked.`);
+    if (proxy && proxyInfo.status.includes('失败')) {
+      throw new Error(`代理节点连接失败，节点离线或被阻断`);
     }
   } catch (err) {
-    console.error(`[Proxy Bridge Error] ${err.message}`);
-    await sendNotification(`❌ *Lunafy Auto Renew Failed*\nProxy Error: \`${err.message}\``);
+    console.error(`[代理错误] ${err.message}`);
+    await sendNotification(`❌ *Lunafy 续期任务失败*\n代理错误: \`${err.message}\``);
     process.exit(1);
   }
 
@@ -345,17 +324,15 @@ async function handleCloudflareTurnstile(page) {
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
   });
 
-  // 注入反反爬属性
   await context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   });
 
   const page = await context.newPage();
-  const screenshotPath = path.join(__dirname, 'latest_run.png');
 
   try {
     // 步骤 1：Discord 免密登录
-    console.log('[Step 1] Initializing Discord login session...');
+    console.log('[步骤 1] 正在初始化 Discord 登录态...');
     await page.goto('https://discord.com/login', { waitUntil: 'domcontentloaded', timeout: 45000 });
 
     await page.evaluate((token) => {
@@ -366,108 +343,91 @@ async function handleCloudflareTurnstile(page) {
 
     await page.goto('https://discord.com/channels/@me', { waitUntil: 'domcontentloaded', timeout: 45000 });
     await page.waitForTimeout(3000);
-    console.log(`[Step 1] Discord current URL: ${page.url()}`);
+    console.log(`[步骤 1] Discord 登录成功，当前地址: ${page.url()}`);
 
-    // 步骤 2：访问 Lunafy 首页（使用 domcontentloaded 规避网络挂起）
-    console.log('[Step 2] Navigating to Lunafy Panel...');
+    // 步骤 2：访问 Lunafy 首页
+    console.log('[步骤 2] 正在打开 Lunafy 面板首页...');
     await page.goto('https://panel.lunafy.run/', { waitUntil: 'domcontentloaded', timeout: 45000 });
     await page.waitForTimeout(3000);
 
-    // 检查并自动点击 Cloudflare 验证盾
     await handleCloudflareTurnstile(page);
 
-    // 步骤 2.1：点击 Discord 登录按钮
+    // 检测 Discord 快捷登录按钮
     const discordLoginBtn = page.locator('a[href*="discord"], button:has-text("Discord"), a:has-text("Discord")').first();
-    if (await discordLoginBtn.isVisible({ timeout: 6000 }).catch(() => false)) {
-      console.log('[Step 2.1] Found Discord login button. Clicking...');
+    if (await discordLoginBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+      console.log('[步骤 2.1] 发现 Discord 授权登录入口，正在点击...');
       await discordLoginBtn.click();
       await page.waitForTimeout(4000);
     }
 
-    // 步骤 3：处理 Discord OAuth2 授权确认
+    // 处理 Discord OAuth 授权
     if (page.url().includes('discord.com/oauth2') || page.url().includes('discord.com')) {
-      console.log('[Step 2.2] On Discord OAuth page, looking for Authorize button...');
+      console.log('[步骤 2.2] 正在确认 Discord OAuth 授权...');
       await page.waitForTimeout(2000);
       const authBtn = page.locator('button[type="submit"]:has-text("Authorize"), button:has-text("授权"), button:has-text("Authorize")').last();
-      if (await authBtn.isVisible({ timeout: 12000 }).catch(() => false)) {
-        console.log('[Step 2.3] Clicking Discord Authorize button...');
+      if (await authBtn.isVisible({ timeout: 10000 }).catch(() => false)) {
         await authBtn.click();
         await page.waitForTimeout(5000);
       }
     }
 
-    // 再次检查如果进入首页有 Cloudflare 盾则处理
     await handleCloudflareTurnstile(page);
 
-    // 步骤 4：等待仪表盘加载
-    console.log('[Step 3] Waiting for Server Status widget...');
-    const cardLocator = page.locator('section.lunafy-server-status, section[class*="lunafy-server-status"], [class*="server-status"]').first();
+    // 步骤 3：获取服务器状态与时间
+    console.log('[步骤 3] 正在获取服务器状态与续期时间...');
+    const cardLocator = page.locator('section.lunafy-server-status, section[class*="lunafy-server-status"]').first();
     await cardLocator.waitFor({ state: 'visible', timeout: 35000 });
 
-    // 提取状态与时间
-    const statusText = await page.locator('section[class*="lunafy-server-status"] .fi-badge, [class*="status__heading"]').innerText().catch(() => 'Active');
-    const datesText = await page.locator('.lunafy-server-status__dates, [class*="status__dates"]').innerText().catch(() => 'Dates not found');
-    
-    // 检查续期操作区
+    const statusBadge = await page.locator('section[class*="lunafy-server-status"] .fi-badge, [class*="status__heading"]').innerText().catch(() => 'Active');
+    const rawDatesText = await page.locator('.lunafy-server-status__dates, [class*="status__dates"]').innerText().catch(() => '');
+
+    // 提取时间信息
+    const nextRenewalMatch = rawDatesText.match(/Next renewal\s+([^\n\r|]+?)(?:\s*Server deleted|$)/i);
+    const nextRenewalTime = nextRenewalMatch ? nextRenewalMatch[1].trim() : (rawDatesText || '未知');
+
+    // 检查续期按钮
     const actionElement = page.locator('.lunafy-server-status__action, [class*="status__action"]').first();
     const actionText = (await actionElement.innerText().catch(() => 'Unavailable')).trim();
 
-    console.log(`\n================= Server Status =================`);
-    console.log(`[Status] Current Status: ${statusText.replace(/\n/g, ' ')}`);
-    console.log(`[Schedule] ${datesText.replace(/\n/g, ' | ')}`);
-    console.log(`[Action State] ${actionText}`);
-    console.log(`=================================================\n`);
+    console.log(`\n================= 服务器状态详情 =================`);
+    console.log(`[当前状态] ${statusBadge.replace(/Server Status:/gi, '').trim()}`);
+    console.log(`[下次续期时间] ${nextRenewalTime}`);
+    console.log(`[续期按钮状态] ${actionText}`);
+    console.log(`==================================================\n`);
 
-    let renewResult = 'No action needed';
-
-    // 判断并执行续期操作
+    // 步骤 4：判断并执行续期操作
+    let needRenew = '否 (未到续期时间)';
     const renewBtn = actionElement.locator('button, a').first();
     const canRenew = (await renewBtn.isVisible().catch(() => false)) && !actionText.toLowerCase().includes('unavailable');
 
     if (canRenew) {
-      console.log('[Step 4] Renewal button is active! Triggering renewal...');
+      console.log('[步骤 4] 满足续期条件，正在执行一键续期...');
       await renewBtn.click();
-      await page.waitForTimeout(5000);
-      renewResult = 'Renewal Triggered Successfully';
-      console.log(`[Success] ${renewResult}`);
+      await page.waitForTimeout(4000);
+      needRenew = '是 (已成功执行续期)';
+      console.log(`[执行结果] 续期请求已提交`);
     } else {
-      console.log('[Step 4] Renewal currently unavailable. Waiting for next window.');
+      console.log('[步骤 4] 当前无需续期，等待下次调度周期');
     }
 
-    // 截图并发送成功通知
-    await page.screenshot({ path: screenshotPath, fullPage: true });
+    // 格式化 Telegram 纯文本通知
+    const summaryMessage = `📋 *主人，Lunafy 续期状态通知*\n\n` +
+      `⏰ *下次续期时间:* \`${nextRenewalTime}\`\n` +
+      `🔄 *是否执行续期:* *${needRenew}*\n\n` +
+      `🖥️ *服务器状态:* \`${statusBadge.replace(/Server Status:/gi, '').trim()}\`\n` +
+      `🌐 *出站节点:* \`${proxyInfo.country} (${proxyInfo.isp})\``;
 
-    const summaryMessage = `*Lunafy Server Status Report*\n\n` +
-      `🌐 *Proxy Node:* \`${proxyInfo.country} (${proxyInfo.isp})\`\n` +
-      `⚡ *Latency:* \`${proxyInfo.latency}\` | *IP:* \`${proxyInfo.ip}\`\n\n` +
-      `• *Server Status:* \`${statusText.trim()}\`\n` +
-      `• *Renewal Schedule:* \`${datesText.replace(/\n/g, ' ')}\`\n` +
-      `• *Action:* \`${actionText}\`\n` +
-      `• *Result:* *${renewResult}*`;
-
-    await sendTelegramPhoto(screenshotPath, summaryMessage);
+    await sendNotification(summaryMessage);
 
   } catch (error) {
-    console.error('[Error] Execution failed:', error.message);
-    console.log('[Debug] Current URL when failed:', page.url());
-
-    try {
-      await page.screenshot({ path: screenshotPath, fullPage: true });
-      const failCaption = `❌ *Lunafy Auto Renew Failed*\n` +
-        `🌐 *Proxy:* \`${proxyInfo ? proxyInfo.ip : 'Direct'}\`\n` +
-        `🔗 *URL:* \`${page.url()}\`\n` +
-        `⚠️ *Error:* \`${error.message}\``;
-      await sendTelegramPhoto(screenshotPath, failCaption);
-    } catch (e) {
-      await sendNotification(`❌ *Lunafy Auto Renew Failed*\nURL: \`${page.url()}\`\nError: \`${error.message}\``);
-    }
-
+    console.error('[执行异常]', error.message);
+    await sendNotification(`❌ *Lunafy 续期任务失败*\n异常原因: \`${error.message}\``);
     process.exit(1);
   } finally {
     await browser.close();
     if (singboxProcess) {
       singboxProcess.kill('SIGTERM');
-      console.log('[Proxy Bridge] Stopped local Sing-box proxy daemon.');
+      console.log('[代理适配] 本地代理通道已关闭');
     }
   }
 })();

@@ -34,7 +34,7 @@ jobs:
           PROXY_NODE: ${{ secrets.PROXY_NODE }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-        run: node renew.js
+        run: node Lunafy.js
 
       # 步骤 1：清理 GitHub Actions 所有缓存
       - name: Clean Actions Cache

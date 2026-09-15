@@ -6,6 +6,11 @@ on:
     - cron: '0 0,6,12,18 * * *'
   workflow_dispatch: # 支持手动点击 Run workflow 测试
 
+# 赋予删除工作流运行记录和缓存的写权限
+permissions:
+  contents: read
+  actions: write
+
 jobs:
   renew:
     runs-on: ubuntu-latest
@@ -29,4 +34,24 @@ jobs:
           PROXY_NODE: ${{ secrets.PROXY_NODE }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-        run: node Lunafy.js
+        run: node renew.js
+
+      # 步骤 1：清理 GitHub Actions 所有缓存
+      - name: Clean Actions Cache
+        if: always()
+        run: |
+          echo "Cleaning repository actions cache..."
+          gh extension install actions/gh-actions-cache 2>/dev/null || true
+          gh actions-cache delete --all --confirm 2>/dev/null || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      # 步骤 2：清理旧的工作流记录（仅保留最后 1 条）
+      - name: Delete Old Workflow Runs
+        if: always()
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_minimum_runs: 1
+          keep_minimum_runs: 1

@@ -14,7 +14,7 @@ const TG_CHAT_ID = process.env.TG_CHAT_ID;
 const LOCAL_SOCKS_PORT = 10808;
 let singboxProcess = null;
 
-// 发送 Telegram 状态通知
+// 发送 Telegram 文本消息
 async function sendNotification(text) {
   if (!TG_BOT_TOKEN || !TG_CHAT_ID) return;
   try {
@@ -23,9 +23,27 @@ async function sendNotification(text) {
       text: text,
       parse_mode: 'Markdown',
     });
-    console.log('[Notification] Telegram message sent.');
+    console.log('[Notification] Telegram text message sent.');
   } catch (err) {
     console.error('[Notification] Failed to send Telegram message:', err.message);
+  }
+}
+
+// 发送 Telegram 图片（报错截图）
+async function sendTelegramPhoto(imagePath, caption) {
+  if (!TG_BOT_TOKEN || !TG_CHAT_ID || !fs.existsSync(imagePath)) return;
+  try {
+    const fileBuffer = fs.readFileSync(imagePath);
+    const formData = new FormData();
+    formData.append('chat_id', TG_CHAT_ID);
+    formData.append('caption', caption);
+    formData.append('parse_mode', 'Markdown');
+    formData.append('photo', new Blob([fileBuffer]), 'screenshot.png');
+
+    await axios.post(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto`, formData);
+    console.log('[Notification] Telegram screenshot photo sent.');
+  } catch (err) {
+    console.error('[Notification] Failed to send TG screenshot:', err.message);
   }
 }
 
@@ -253,9 +271,10 @@ async function setupProxyBridge() {
   });
 
   const page = await context.newPage();
+  const screenshotPath = path.join(__dirname, 'latest_run.png');
 
   try {
-    // 步骤 1：在 Discord 注入 Token 登录
+    // 步骤 1：Discord 注入 Token 登录
     console.log('[Step 1] Initializing Discord login session...');
     await page.goto('https://discord.com/login', { waitUntil: 'domcontentloaded', timeout: 45000 });
 
@@ -265,55 +284,46 @@ async function setupProxyBridge() {
       iframe.contentWindow.localStorage.token = `"${token}"`;
     }, DISCORD_TOKEN);
 
-    // 访问 Discord 主界面确认登录成功
     await page.goto('https://discord.com/channels/@me', { waitUntil: 'domcontentloaded', timeout: 45000 });
     await page.waitForTimeout(3000);
-    console.log(`[Step 1] Discord current page: ${page.url()}`);
+    console.log(`[Step 1] Discord current URL: ${page.url()}`);
 
-    // 步骤 2：访问 Lunafy 控制台
-    console.log('[Step 2] Navigating to Lunafy Panel...');
-    await page.goto('https://panel.lunafy.run/dashboard', { waitUntil: 'domcontentloaded', timeout: 45000 });
-    await page.waitForTimeout(4000);
-    console.log(`[Step 2] Lunafy landed on: ${page.url()}`);
+    // 步骤 2：直接进入 Lunafy 认证入口
+    console.log('[Step 2] Navigating to Lunafy...');
+    await page.goto('https://panel.lunafy.run/login', { waitUntil: 'networkidle', timeout: 45000 }).catch(async () => {
+      await page.goto('https://panel.lunafy.run/dashboard', { waitUntil: 'networkidle', timeout: 45000 });
+    });
+    await page.waitForTimeout(3000);
 
-    // 步骤 2.1：处理未登录/重定向情况（点击 Discord 登录）
-    if (!page.url().includes('/dashboard') || (await page.locator('text=Discord').isVisible().catch(() => false))) {
-      console.log('[Step 2.1] Login required. Looking for Discord login button...');
-      const discordBtn = page.locator('a[href*="discord"], button:has-text("Discord"), a:has-text("Discord")').first();
-      
-      if (await discordBtn.isVisible({ timeout: 8000 }).catch(() => false)) {
-        console.log('[Step 2.2] Clicking Discord Login button...');
-        await Promise.all([
-          page.waitForNavigation({ timeout: 30000 }).catch(() => {}),
-          discordBtn.click(),
-        ]);
-      }
+    // 检测是否有 Discord 登录按钮
+    const discordLoginBtn = page.locator('a[href*="discord"], button:has-text("Discord"), a:has-text("Discord")').first();
+    if (await discordLoginBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+      console.log('[Step 2.1] Found Discord login button. Clicking...');
+      await discordLoginBtn.click();
+      await page.waitForTimeout(4000);
     }
 
-    // 步骤 2.2：处理 Discord OAuth2 授权确认页面
+    // 步骤 3：处理 Discord OAuth2 授权确认
     if (page.url().includes('discord.com/oauth2') || page.url().includes('discord.com')) {
-      console.log('[Step 2.3] On Discord OAuth page. Waiting for Authorize button...');
-      await page.waitForTimeout(3000);
-      
-      const authBtn = page.locator('button[type="submit"], button:has-text("Authorize"), button:has-text("授权")').last();
-      if (await authBtn.isVisible({ timeout: 12000 }).catch(() => false)) {
-        console.log('[Step 2.4] Clicking Discord Authorize button...');
-        await Promise.all([
-          page.waitForURL((url) => url.hostname.includes('lunafy.run'), { timeout: 30000 }).catch(() => {}),
-          authBtn.click(),
-        ]);
+      console.log('[Step 2.2] On Discord OAuth page, searching for Authorize button...');
+      await page.waitForTimeout(2000);
+      const authBtn = page.locator('button[type="submit"]:has-text("Authorize"), button:has-text("授权"), button:has-text("Authorize")').last();
+      if (await authBtn.isVisible({ timeout: 10000 }).catch(() => false)) {
+        console.log('[Step 2.3] Clicking Authorize...');
+        await authBtn.click();
+        await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
       }
     }
 
-    // 确保回到仪表盘
+    // 确保进入 dashboard
     if (!page.url().includes('/dashboard')) {
-      console.log('[Step 2.5] Redirecting to dashboard...');
+      console.log('[Step 2.4] Redirecting to dashboard...');
       await page.goto('https://panel.lunafy.run/dashboard', { waitUntil: 'networkidle', timeout: 45000 });
     }
 
-    // 步骤 3：等待服务器状态组件加载
+    // 步骤 4：等待仪表盘加载
     console.log('[Step 3] Waiting for Server Status widget...');
-    const cardLocator = page.locator('section.lunafy-server-status, section[class*="lunafy-server-status"], div[wire\\:id]').first();
+    const cardLocator = page.locator('section.lunafy-server-status, section[class*="lunafy-server-status"], [class*="server-status"]').first();
     await cardLocator.waitFor({ state: 'visible', timeout: 35000 });
 
     // 提取状态与时间
@@ -337,7 +347,7 @@ async function setupProxyBridge() {
     const canRenew = (await renewBtn.isVisible().catch(() => false)) && !actionText.toLowerCase().includes('unavailable');
 
     if (canRenew) {
-      console.log('[Step 4] Renewal button is active! Triggering renewal...');
+      console.log('[Step 4] Renewal available! Triggering renewal...');
       await renewBtn.click();
       await page.waitForTimeout(5000);
       renewResult = 'Renewal Triggered Successfully';
@@ -346,19 +356,29 @@ async function setupProxyBridge() {
       console.log('[Step 4] Renewal currently unavailable. Waiting for next window.');
     }
 
-    // 发送 Telegram 状态汇总
+    // 运行成功截图并推送
+    await page.screenshot({ path: screenshotPath, fullPage: true });
+
     const summaryMessage = `*Lunafy Server Status Report*\n\n` +
       `• *Status:* \`${statusText.trim()}\`\n` +
       `• *Dates:* \`${datesText.replace(/\n/g, ' ')}\`\n` +
       `• *Action:* \`${actionText}\`\n` +
       `• *Result:* *${renewResult}*`;
 
-    await sendNotification(summaryMessage);
+    await sendTelegramPhoto(screenshotPath, summaryMessage);
 
   } catch (error) {
     console.error('[Error] Execution failed:', error.message);
     console.log('[Debug] Current URL when failed:', page.url());
-    await sendNotification(`❌ *Lunafy Auto Renew Failed*\nURL: \`${page.url()}\`\nError: \`${error.message}\``);
+
+    // 异常时截屏并发送至 Telegram 便于诊断
+    try {
+      await page.screenshot({ path: screenshotPath, fullPage: true });
+      await sendTelegramPhoto(screenshotPath, `❌ *Lunafy Auto Renew Failed*\nURL: \`${page.url()}\`\nError: \`${error.message}\``);
+    } catch (e) {
+      await sendNotification(`❌ *Lunafy Auto Renew Failed*\nURL: \`${page.url()}\`\nError: \`${error.message}\``);
+    }
+
     process.exit(1);
   } finally {
     await browser.close();

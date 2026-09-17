@@ -4,6 +4,11 @@ on:
   workflow_dispatch:
     # 支持手动触发
 
+# 赋予 GitHub 默认 Token 操作 Actions 运行记录的写入权限（用于清理旧记录）
+permissions:
+  contents: read
+  actions: write
+
 jobs:
   renew:
     runs-on: ubuntu-latest
@@ -30,16 +35,52 @@ jobs:
           bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
 
       - name: Run FenixHost Renew
+        id: renew_task
         env:
-          # 单账号
+          # 单账号：从 Secrets 读 Cookie，从 Variables 读 Service IDs
           FENIX_COOKIE: ${{ secrets.FENIX_COOKIE }}
           FENIX_SERVICE_IDS: ${{ vars.FENIX_SERVICE_IDS }}
 
           # 通用配置
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-
-          # 代理（可选）：若配置了 NODE_LINK，setup_proxy.sh 会启动 sing-box，
-          # 脚本会自动检测本地代理端口；也可用 FENIX_PROXY 显式指定
           FENIX_PROXY: ${{ secrets.FENIX_PROXY }}
         run: python fenixhost_renew.py
+
+      # 需求 1：自动更新并覆盖 Secret 中的 FENIX_COOKIE
+      - name: 🔄 自动覆盖更新 FENIX_COOKIE Secret
+        if: steps.renew_task.outputs.NEW_FENIX_COOKIE != ''
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          NEW_COOKIE: ${{ steps.renew_task.outputs.NEW_FENIX_COOKIE }}
+        run: |
+          if [ -n "$GH_TOKEN" ]; then
+            echo "🔑 检测到 GH_PAT，正在更新 Secret: FENIX_COOKIE ..."
+            gh secret set FENIX_COOKIE --body "$NEW_COOKIE"
+            echo "🎉 成功将最新有效 Cookie 覆盖至 FENIX_COOKIE！"
+          else
+            echo "⚠️ 未配置 GH_PAT (Personal Access Token)。"
+            echo "ℹ️ GitHub 默认 GITHUB_TOKEN 无权限修改 Secrets。"
+            echo "💡 若需自动覆盖，请在 Secrets 中添加具有 repo/secrets 权限的 PAT，命名为 GH_PAT。"
+          fi
+
+      # 需求 2：清理旧工作流，保留最新 1 条
+      - name: 🧹 清理历史工作流记录 (仅保留最新1条)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "🔍 正在检索历史运行记录..."
+          WORKFLOW_NAME="fenixhost-renew.yml"
+          # 查询已完成 (completed) 的运行 ID，使用 jq 跳过最新 1 条 (.[1:])，提取更早的所有记录
+          RUN_IDS=$(gh run list --workflow "$WORKFLOW_NAME" --status completed --limit 100 --json databaseId -q '.[1:][].databaseId' 2>/dev/null || true)
+          
+          if [ -n "$RUN_IDS" ]; then
+            for id in $RUN_IDS; do
+              echo "🗑️ 正在删除旧记录: $id"
+              gh run delete "$id" || true
+            done
+            echo "✅ 历史工作流记录清理完成，已保留最新 1 条记录。"
+          else
+            echo "✨ 当前无多余的历史运行记录需要清理。"
+          fi

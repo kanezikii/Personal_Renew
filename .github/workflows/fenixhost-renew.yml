@@ -4,8 +4,7 @@ on:
   workflow_dispatch:
     # 支持在 GitHub 网页手动点击触发
   schedule:
-    # 每 3 天执行一次（UTC 02:00，换算为北京时间上午 10:00）
-    - cron: '0 2 */3 * *'
+    - cron: '0 2 */4 * *'
 
 permissions:
   contents: read
@@ -62,7 +61,7 @@ jobs:
           fi
 
       # 需求 2：清理旧工作流，保留最新 1 条
-      - name: 🧹 清理历史工作流记录 (仅保留最新1条)
+      - name: 🧹 清理历史工作流记录
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}

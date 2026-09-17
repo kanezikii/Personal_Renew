@@ -31,21 +31,9 @@ jobs:
 
       - name: Run FenixHost Renew
         env:
-          # 单账号（向下兼容）
+          # 单账号
           FENIX_COOKIE: ${{ secrets.FENIX_COOKIE }}
           FENIX_SERVICE_IDS: ${{ vars.FENIX_SERVICE_IDS }}
-
-          # 多账号 1
-          FENIX_COOKIE_1: ${{ secrets.FENIX_COOKIE_1 }}
-          FENIX_SERVICE_IDS_1: ${{ vars.FENIX_SERVICE_IDS_1 }}
-
-          # 多账号 2
-          FENIX_COOKIE_2: ${{ secrets.FENIX_COOKIE_2 }}
-          FENIX_SERVICE_IDS_2: ${{ vars.FENIX_SERVICE_IDS_2 }}
-
-          # 多账号 3（按需继续添加）
-          FENIX_COOKIE_3: ${{ secrets.FENIX_COOKIE_3 }}
-          FENIX_SERVICE_IDS_3: ${{ vars.FENIX_SERVICE_IDS_3 }}
 
           # 通用配置
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}

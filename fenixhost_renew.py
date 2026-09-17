@@ -3,7 +3,7 @@
 # ============================================================
 # 模板名称：FenixHost 免费服务器续期脚本
 # 描述：通过 Cookie + Paymenter/Livewire 调用 renewFree 续期
-# 支持多账号多服务
+# 支持多账号多服务，支持剩余时间判断（大于3天自动跳过）
 # 归类：Paymenter / Livewire 类型
 # 仓库: https://github.com/jacksun-king/fenixhost-renew
 # ============================================================
@@ -114,10 +114,11 @@ def _add_account(cookie: str, service_ids_raw: str, label: str, sid_label: str):
     return True
 
 
+# 账号1：label 已修改为 renqi
 _add_account(
     os.environ.get("FENIX_COOKIE") or "",
     os.environ.get("FENIX_SERVICE_IDS") or "",
-    "账号1",
+    "renqi",
     "FENIX_SERVICE_IDS",
 )
 
@@ -226,23 +227,24 @@ def take_page_screenshot(cookie: str, service_id: str, save_path: str) -> bool:
         return False
 
 
-def format_notification(status: str, label: str, service_id: str, new_expiry: str) -> str:
-    """格式化续期通知消息（开头修改为 💗主人）"""
+def format_notification(status: str, label: str, service_id: str, expiry_text: str) -> str:
+    """格式化续期通知消息（开头修改为 💗主人，账号1 变更为 renqi）"""
+    display_label = "renqi" if label == "账号1" else label
     now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
     lines = [
         "💗主人 FenixHost 免费服务器续期",
         "",
         f"{status}",
-        f"👤 {label}",
+        f"👤 {display_label}",
         f"🆔 服务ID: {service_id}",
-        f"📅 到期时间: {new_expiry}",
+        f"📅 到期时间: {expiry_text}",
         f"⏰ 执行时间: {now}",
     ]
     return "\n".join(lines)
 
 
 def parse_cookies(cookie_str: str) -> dict:
-    """将 Cookie 字符串解析为字典（兼容中英文分号）"""
+    """解析 Cookie，自动兼容全角分号"""
     cookies = {}
     clean_cookie = cookie_str.replace("；", ";")
     for item in clean_cookie.split(";"):
@@ -254,9 +256,8 @@ def parse_cookies(cookie_str: str) -> dict:
 
 
 def serialize_cookies(cookies_dict: dict) -> str:
-    """将 Cookie 字典序列化为标准规范字符串，优先保证关键键顺序"""
+    """序列化规范 Cookie，排序并过滤无用键"""
     ordered_keys = []
-    # 优先键
     if "paymenter_session" in cookies_dict:
         ordered_keys.append("paymenter_session")
     for k in cookies_dict:
@@ -264,7 +265,6 @@ def serialize_cookies(cookies_dict: dict) -> str:
             ordered_keys.append(k)
     if "XSRF-TOKEN" in cookies_dict:
         ordered_keys.append("XSRF-TOKEN")
-    # 其他非 cart 键
     for k in cookies_dict:
         if k not in ordered_keys and k != "cart":
             ordered_keys.append(k)
@@ -331,22 +331,49 @@ def extract_livewire_snapshot(html: str) -> dict:
     return None
 
 
-def extract_expiry(html: str) -> str:
+def extract_expiry_info(html: str) -> tuple[str, float | None]:
+    """
+    从页面 HTML 中提取到期时间及剩余天数。
+    返回: (格式化时间字符串, 剩余天数浮点数)
+    """
+    now_dt = datetime.now(timezone.utc)
+
+    # 1. 优先从 data-expires 提取 Unix 时间戳
     m = re.search(r'data-expires="(\d+)"', html)
     if m:
         ts = int(m.group(1))
         try:
-            dt = datetime.fromtimestamp(ts, timezone.utc) + timedelta(hours=8)
-            return dt.strftime("%Y-%m-%d %H:%M:%S")
+            expire_dt = datetime.fromtimestamp(ts, timezone.utc)
+            remaining_days = (expire_dt - now_dt).total_seconds() / 86400.0
+            bj_time = (expire_dt + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+            return bj_time, remaining_days
         except (ValueError, OSError):
-            return m.group(1)
+            pass
+
+    # 2. 备选：查找 data-expires 附近纯数字时间戳
+    m = re.search(r'data-expires[^0-9]*(\d{10})', html)
+    if m:
+        ts = int(m.group(1))
+        try:
+            expire_dt = datetime.fromtimestamp(ts, timezone.utc)
+            remaining_days = (expire_dt - now_dt).total_seconds() / 86400.0
+            bj_time = (expire_dt + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+            return bj_time, remaining_days
+        except (ValueError, OSError):
+            pass
+
+    # 3. 兜底：查找 "Expires at: Month DD, YYYY"
     m = re.search(r'Expires at:\s*([A-Za-z]{3}\s+\d{1,2},\s*\d{4})', html)
     if m:
-        return m.group(1)
-    m = re.search(r'data-expires[^0-9]*(\d+)', html)
-    if m:
-        return m.group(1)
-    return ""
+        date_str = m.group(1)
+        try:
+            expire_dt = datetime.strptime(date_str, "%b %d, %Y").replace(tzinfo=timezone.utc)
+            remaining_days = (expire_dt - now_dt).total_seconds() / 86400.0
+            return date_str, remaining_days
+        except Exception:
+            return date_str, None
+
+    return "", None
 
 
 # ------------------------------------------------------------
@@ -378,6 +405,25 @@ def renew_service(cookie: str, service_id: str) -> dict:
         print(f"  ❌ HTTP {resp.status_code}: 获取服务页面失败")
         return {"status": "error", "message": f"HTTP {resp.status_code}"}
 
+    # 解析当前到期时间及剩余天数
+    old_expiry, remaining_days = extract_expiry_info(resp.text)
+    fresh_cookie = serialize_cookies(session.cookies.get_dict())
+
+    # 📌 核心判断：剩余时间大于 3 天则直接跳过续期
+    if remaining_days is not None:
+        if remaining_days > 3.0:
+            print(f"  ⏩ 当前剩余时间: {remaining_days:.2f} 天（> 3天），时间充裕，跳过本次续期！")
+            return {
+                "status": "skipped",
+                "new_expiry": f"{old_expiry} (剩余 {remaining_days:.1f} 天)",
+                "fresh_cookie": fresh_cookie
+            }
+        else:
+            print(f"  ⏳ 当前剩余时间: {remaining_days:.2f} 天（<= 3天），立即触发自动续期...")
+    else:
+        print(f"  ⚠️ 未能精确解析剩余天数，为防机器过期，默认发起续期...")
+
+    # 提取 CSRF 与 Livewire Snapshot
     csrf_token = extract_csrf_token(resp.text)
     if not csrf_token:
         print(f"  ❌ 未找到 CSRF token")
@@ -389,9 +435,8 @@ def renew_service(cookie: str, service_id: str) -> dict:
         return {"status": "error", "message": "未找到续期组件"}
 
     print(f"  ✅ 已获取 CSRF token 和续期组件")
-    old_expiry = extract_expiry(resp.text)
 
-    # 调用 renewFree
+    # 执行 renewFree 调用
     payload = {
         "_token": csrf_token,
         "components": [
@@ -417,7 +462,7 @@ def renew_service(cookie: str, service_id: str) -> dict:
         print(f"  ❌ Livewire HTTP {lw_resp.status_code}")
         return {"status": "error", "message": f"Livewire HTTP {lw_resp.status_code}"}
 
-    # 再次 GET 页面以确认到期时间，并刷新最新 Cookie
+    # 重新 GET 页面确认到期时间并刷新 Session
     print(f"  🔄 重新获取页面确认到期时间...")
     try:
         resp2 = session.get(service_url, headers=get_browser_headers(),
@@ -430,17 +475,20 @@ def renew_service(cookie: str, service_id: str) -> dict:
             "fresh_cookie": serialize_cookies(session.cookies.get_dict())
         }
 
-    new_expiry = extract_expiry(resp2.text)
-    # 提取经过所有请求后 Session 保存的最全最新 Cookie
+    new_expiry, new_remaining_days = extract_expiry_info(resp2.text)
     fresh_cookie = serialize_cookies(session.cookies.get_dict())
 
     if new_expiry:
+        remaining_str = f" (剩余 {new_remaining_days:.1f} 天)" if new_remaining_days is not None else ""
         if old_expiry and new_expiry != old_expiry:
-            print(f"  ✅ 续期成功! 到期时间从 {old_expiry} 更新为 {new_expiry}")
+            print(f"  ✅ 续期成功! 到期时间更新为 {new_expiry}{remaining_str}")
         else:
-            print(f"  ✅ 续期请求成功，当前到期时间: {new_expiry}")
-            print(f"     （注：若到期时间未变化，说明服务已满额续期或存在冷却时间）")
-        return {"status": "success", "new_expiry": new_expiry, "fresh_cookie": fresh_cookie}
+            print(f"  ✅ 续期请求成功，当前到期时间: {new_expiry}{remaining_str}")
+        return {
+            "status": "success",
+            "new_expiry": f"{new_expiry}{remaining_str}",
+            "fresh_cookie": fresh_cookie
+        }
     else:
         print(f"  ✅ Livewire 请求成功，但无法解析到期时间")
         screenshot_path = f"/tmp/fenixhost_{service_id}.png"
@@ -476,19 +524,31 @@ def main():
         for service_id in service_ids:
             try:
                 result = renew_service(cookie, service_id)
-                status_ok = (result["status"] == "success")
+                status_code = result["status"]
+                
+                if status_code == "success":
+                    status_display = "✅ 续期成功"
+                    status_ok = True
+                elif status_code == "skipped":
+                    status_display = "⏩ 跳过续期（剩余大于3天）"
+                    status_ok = True
+                else:
+                    status_display = "❌ 续期失败"
+                    status_ok = False
+
                 info = {
                     "label": label,
                     "service_id": service_id,
-                    "status": "✅ 续期成功" if status_ok else "❌ 续期失败",
+                    "status": status_display,
                     "new_expiry": result.get("new_expiry", "未知"),
                 }
-                # 如果账号1有成功更新的 Cookie，记录下来
-                if status_ok and label == "账号1" and result.get("fresh_cookie"):
+
+                # 若账号为 renqi 且会话正常，记录刷新后的最新 Cookie
+                if status_ok and label in ("renqi", "账号1") and result.get("fresh_cookie"):
                     latest_account1_cookie = result["fresh_cookie"]
 
             except Exception as e:
-                print(f"  ❌ 服务 {service_id} 续期失败: {e}")
+                print(f"  ❌ 服务 {service_id} 处理失败: {e}")
                 info = {
                     "label": label,
                     "service_id": service_id,
@@ -507,17 +567,18 @@ def main():
             )
             send_telegram(msg)
 
-    # 如果抓取到了新的 Cookie，输出给 GitHub Actions 供后续步骤更新 Secret
+    # 捕获到了最新 Cookie 则输出给 GitHub Actions 更新 Secret
     if latest_account1_cookie:
-        print("\n🍪 成功提取最新会话 Cookie，已写入 GITHUB_OUTPUT")
+        print("\n🍪 成功获取最新会话 Cookie，已写入 GITHUB_OUTPUT")
         set_github_output("NEW_FENIX_COOKIE", latest_account1_cookie)
 
     # 汇总
     success = sum(1 for r in all_results if "成功" in r["status"])
+    skipped = sum(1 for r in all_results if "跳过" in r["status"])
     fail = sum(1 for r in all_results if "失败" in r["status"])
     accounts = len(set(r["label"] for r in all_results))
     print(f"\n{'=' * 40}")
-    print(f"📊 汇总: {accounts} 个账号, {success} 成功, {fail} 失败, 共 {len(all_results)} 个服务")
+    print(f"📊 汇总: {accounts} 个账号, {success} 成功, {skipped} 跳过, {fail} 失败, 共 {len(all_results)} 个服务")
     print(f"{'=' * 40}")
 
 

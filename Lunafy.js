@@ -296,7 +296,16 @@ async function setupProxyBridge() {
     console.log('[代理适配] 正在下载 Sing-box 内核...');
     const arch = os.arch() === 'arm64' ? 'arm64' : 'amd64';
     const coreUrl = `https://github.com/SagerNet/sing-box/releases/download/v1.10.7/sing-box-1.10.7-linux-${arch}.tar.gz`;
-    execSync(`curl -sL "${coreUrl}" \vert{} tar -xz -C "${binDir}" --strip-components=1`);
+    const tempArchive = path.join(binDir, 'singbox.tar.gz');
+
+    // 1. 独立下载压缩包文件
+    execSync(`curl -fsSL -o "${tempArchive}" "${coreUrl}"`);
+
+    // 2. 解压并去除顶层文件夹
+    execSync(`tar -xzf "${tempArchive}" -C "${binDir}" --strip-components=1`);
+
+    // 3. 清理临时压缩包并赋予执行权限
+    if (fs.existsSync(tempArchive)) fs.unlinkSync(tempArchive);
     fs.chmodSync(singboxPath, 0o775);
   }
 

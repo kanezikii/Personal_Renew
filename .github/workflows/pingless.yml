@@ -36,7 +36,7 @@ jobs:
       - name: 🚀 运行续期脚本
         env:
           EMAIL: ${{ secrets.EMAIL }}
-          pingDISCORD_TOKEN: ${{ secrets.pingDISCORD_TOKEN }}
+          PINGDISCORD_TOKEN: ${{ secrets.PINGDISCORD_TOKEN }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |

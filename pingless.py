@@ -6,19 +6,19 @@ from seleniumbase import SB
 
 # 环境变量配置(可以直接私库在双引号里填写)
 EMAIL         = os.environ.get("EMAIL") or ""
-DISCORD_TOKEN = os.environ.get("pingDISCORD_TOKEN") or ""
+DISCORD_TOKEN = os.environ.get("PINGDISCORD_TOKEN") or ""
 TG_CHAT_ID    = os.environ.get("TG_CHAT_ID") or ""
 TG_BOT_TOKEN  = os.environ.get("TG_BOT_TOKEN") or ""
 
 BASE_URL = "https://dash.pingless.org"
 
-# 解析 DISCORD_TOKEN
+# 解析 PINGDISCORD_TOKEN
 DC_TOKEN = ""
-if DISCORD_TOKEN:
-    _parts = DISCORD_TOKEN.split(",", 1)
+if PINGDISCORD_TOKEN:
+    _parts = PINGDISCORD_TOKEN.split(",", 1)
     DC_TOKEN = _parts[-1].strip()
 else:
-    print("❌ 未配置 DISCORD_TOKEN,脚本退出")
+    print("❌ 未配置 PINGDISCORD_TOKEN,脚本退出")
     sys.exit(1)
 
 # 发送tg通知

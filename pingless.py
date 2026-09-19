@@ -6,7 +6,7 @@ from seleniumbase import SB
 
 # 环境变量配置(可以直接私库在双引号里填写)
 EMAIL         = os.environ.get("EMAIL") or ""
-DISCORD_TOKEN = os.environ.get("PINGDISCORD_TOKEN") or ""
+PINGDISCORD_TOKEN = os.environ.get("PINGDISCORD_TOKEN") or ""
 TG_CHAT_ID    = os.environ.get("TG_CHAT_ID") or ""
 TG_BOT_TOKEN  = os.environ.get("TG_BOT_TOKEN") or ""
 

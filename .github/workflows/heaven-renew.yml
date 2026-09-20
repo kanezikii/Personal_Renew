@@ -2,8 +2,7 @@ name: HeavenCloud Auto Renew
 
 on:
   schedule:
-    # 每天 UTC 02:00 与 14:00 (北京时间 10:00 与 22:00) 自动执行
-    - cron: '0 2,14 * * *'
+    - cron: '0 14 */2 * *'
   workflow_dispatch: # 支持手动触发测试
 
 jobs:

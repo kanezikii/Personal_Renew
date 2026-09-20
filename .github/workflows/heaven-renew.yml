@@ -4,7 +4,7 @@ on:
   schedule:
     # 每天 UTC 02:00 与 14:00 (北京时间 10:00 与 22:00) 自动执行
     - cron: '0 2,14 * * *'
-  workflow_dispatch: # 支持在 GitHub Actions 页面手动点击触发
+  workflow_dispatch: # 支持手动触发测试
 
 jobs:
   renew:
@@ -19,56 +19,17 @@ jobs:
         with:
           node-version: 20
 
-      - name: 安装 Playwright 与浏览器内核
+      - name: 安装依赖与浏览器内核
         run: |
           npm init -y
-          npm install playwright
+          npm install playwright yaml
           npx playwright install chromium --with-deps
 
       - name: 清理旧进程与启动多协议代理 (Mihomo)
         env:
           heaven_PROXY_CONFIG: ${{ secrets.heaven_PROXY_CONFIG }}
         run: |
-          echo "[*] 清理残留进程与历史临时缓存..."
-          pkill -9 -f "mihomo" || true
-          pkill -9 -f "chrome" || true
-          pkill -9 -f "playwright" || true
-          rm -rf /tmp/mihomo
-          rm -f new_cookies.json
-
-          if [ -n "$heaven_PROXY_CONFIG" ]; then
-            echo "[*] 检测到 heaven_PROXY_CONFIG，部署 Mihomo 代理环境..."
-            mkdir -p /tmp/mihomo
-            cd /tmp/mihomo
-
-            # 下载 Mihomo 预编译内核
-            curl -sL "https://github.com/MetaCubeX/mihomo/releases/download/v1.18.7/mihomo-linux-amd64-v1.18.7.gz" | gzip -d > mihomo
-            chmod +x mihomo
-
-            # 判断是订阅链接还是 YAML 配置内容
-            if [[ "$heaven_PROXY_CONFIG" =~ ^https?:// ]]; then
-              echo "[*] 从订阅链接拉取节点配置..."
-              curl -sL "$heaven_PROXY_CONFIG" -o config.yaml
-              sed -i '1i mixed-port: 7890\nallow-lan: false\n' config.yaml
-            else
-              echo "[*] 写入自定义节点 YAML 配置..."
-              printf "mixed-port: 7890\nallow-lan: false\nmode: rule\nlog-level: warning\n%s\n" "$heaven_PROXY_CONFIG" > config.yaml
-            fi
-
-            echo "[*] 后台启动 Mihomo..."
-            nohup ./mihomo -d . > mihomo.log 2>&1 &
-            sleep 3
-
-            # 连通性测试
-            if curl -s -x http://127.0.0.1:7890 https://www.google.com > /dev/null; then
-              echo "[+] 代理已启动，127.0.0.1:7890 连接正常！"
-            else
-              echo "[!] 代理启动完成但测试外网受阻，输出日志排查："
-              cat mihomo.log
-            fi
-          else
-            echo "[*] 未配置 heaven_PROXY_CONFIG，采用直连网络执行任务。"
-          fi
+          node heaven-renew.js --setup-proxy
 
       - name: 执行自动化续期脚本
         env:
@@ -88,7 +49,7 @@ jobs:
             gh secret set heavencookies --repo "${{ github.repository }}" < new_cookies.json
             echo "[+] heavencookies 自动更新覆写成功！"
           else
-            echo "[*] 跳过更新: 未生成 new_cookies.json 或仓库未配置 GH_PAT。"
+            echo "[*] 跳过更新: 未生成 new_cookies.json 或未配置 GH_PAT。"
           fi
 
       - name: 上传执行现场截图
@@ -100,11 +61,7 @@ jobs:
             *.png
           retention-days: 3
 
-      - name: 强制清理进程与代理缓存
+      - name: 强制清理残留进程与临时缓存
         if: always()
         run: |
-          echo "[*] 任务结束，彻底清理临时缓存与后台进程..."
-          pkill -9 -f "mihomo" || true
-          pkill -9 -f "chrome" || true
-          pkill -9 -f "playwright" || true
-          rm -rf /tmp/mihomo
+          node heaven-renew.js --clean

@@ -10,7 +10,7 @@ const PROXY_CONFIG_RAW = (process.env.heaven_PROXY_CONFIG || '').trim();
 const CONFIG_DIR = '/tmp/mihomo';
 
 /**
- * 1. Cookies 清洗与标准化（严格适配 Playwright 的 sameSite 枚举）
+ * 1. Cookies 清洗与标准化（适配 Playwright strict/lax/none 枚举）
  */
 function sanitizeCookies(raw) {
   if (!raw) return [];
@@ -50,7 +50,7 @@ function sanitizeCookies(raw) {
     if (typeof item.httpOnly === 'boolean') clean.httpOnly = item.httpOnly;
     if (typeof item.expires === 'number' && item.expires > 0) clean.expires = Math.floor(item.expires);
 
-    // 纠正 sameSite 为 Strict | Lax | None
+    // 纠正 sameSite
     if (item.sameSite) {
       const s = String(item.sameSite).toLowerCase().trim();
       if (s === 'lax') clean.sameSite = 'Lax';
@@ -64,10 +64,10 @@ function sanitizeCookies(raw) {
 }
 
 /**
- * 2. 多协议节点转换器（支持 VLESS / Hysteria2 / Trojan / SS / VMess / 订阅 / Clash YAML）
+ * 2. 多协议解析器：支持 VMess / VLESS / Hysteria2 / Trojan / SS / 订阅
  */
 async function parseProxyToMihomo(rawInput) {
-  let text = rawInput.trim();
+  let text = rawInput.replace(/^["']|["']$/g, '').trim();
   if (!text) return null;
 
   // 1. 如果是 HTTP/HTTPS 订阅链接
@@ -76,13 +76,12 @@ async function parseProxyToMihomo(rawInput) {
     const res = await fetch(text, { headers: { 'User-Agent': 'ClashMeta; Mihomo' } });
     text = await res.text();
     text = text.trim();
-    // 检查是否为 Base64 编码的订阅
     if (!text.includes('proxies:') && !text.includes('server:') && /^[A-Za-z0-9+/=\r\n]+$/.test(text)) {
       text = Buffer.from(text, 'base64').toString('utf-8');
     }
   }
 
-  // 2. 如果包含 Clash YAML 关键字
+  // 2. 如果包含 Clash YAML 格式
   if (text.includes('proxies:')) {
     try {
       const parsed = YAML.parse(text);
@@ -97,7 +96,46 @@ async function parseProxyToMihomo(rawInput) {
 
   for (const line of lines) {
     try {
-      if (line.startsWith('vless://')) {
+      // 解析 VMess 协议 (Base64 JSON)
+      if (line.startsWith('vmess://')) {
+        const b64 = line.slice(8).trim();
+        const vJson = JSON.parse(Buffer.from(b64, 'base64').toString('utf-8'));
+        const node = {
+          name: vJson.ps || `vmess-${vJson.add}`,
+          type: 'vmess',
+          server: vJson.add,
+          port: parseInt(vJson.port || '443', 10),
+          uuid: vJson.id,
+          alterId: parseInt(vJson.aid || '0', 10),
+          cipher: vJson.scy || 'auto',
+          udp: true,
+          tls: vJson.tls === 'tls',
+          'skip-cert-verify': vJson.insecure === '1'
+        };
+        if (vJson.sni || vJson.host) {
+          node.servername = vJson.sni || vJson.host;
+        }
+        if (vJson.fp) {
+          node['client-fingerprint'] = vJson.fp;
+        }
+        if (vJson.alpn) {
+          const arr = vJson.alpn.split(',').map(s => s.trim()).filter(Boolean);
+          if (arr.length > 0) node.alpn = arr;
+        }
+        const net = (vJson.net || 'tcp').toLowerCase();
+        node.network = net;
+        if (net === 'ws') {
+          node['ws-opts'] = {
+            path: vJson.path || '/',
+            headers: { Host: vJson.host || vJson.sni || vJson.add }
+          };
+        } else if (net === 'grpc') {
+          node['grpc-opts'] = { 'grpc-service-name': vJson.path || '' };
+        }
+        proxies.push(node);
+      }
+      // 解析 VLESS 协议
+      else if (line.startsWith('vless://')) {
         const u = new URL(line);
         const p = u.searchParams;
         const node = {
@@ -128,7 +166,9 @@ async function parseProxyToMihomo(rawInput) {
           };
         }
         proxies.push(node);
-      } else if (line.startsWith('hysteria2://') || line.startsWith('hy2://')) {
+      }
+      // 解析 Hysteria2 协议
+      else if (line.startsWith('hysteria2://') || line.startsWith('hy2://')) {
         const u = new URL(line);
         const p = u.searchParams;
         proxies.push({
@@ -140,7 +180,9 @@ async function parseProxyToMihomo(rawInput) {
           sni: p.get('sni') || u.hostname,
           'skip-cert-verify': p.get('insecure') === '1'
         });
-      } else if (line.startsWith('trojan://')) {
+      }
+      // 解析 Trojan 协议
+      else if (line.startsWith('trojan://')) {
         const u = new URL(line);
         const p = u.searchParams;
         proxies.push({
@@ -153,25 +195,13 @@ async function parseProxyToMihomo(rawInput) {
           udp: true,
           'skip-cert-verify': p.get('allowInsecure') === '1'
         });
-      } else if (line.startsWith('ss://')) {
-        const rest = line.slice(5);
-        const hashIdx = rest.indexOf('#');
-        const name = hashIdx > -1 ? decodeURIComponent(rest.slice(hashIdx + 1)) : 'ss-node';
-        const mainPart = hashIdx > -1 ? rest.slice(0, hashIdx) : rest;
-        if (mainPart.includes('@')) {
-          const [userinfo, serverinfo] = mainPart.split('@');
-          const decodedUser = Buffer.from(userinfo, 'base64').toString('utf-8');
-          const [cipher, password] = decodedUser.includes(':') ? decodedUser.split(':') : userinfo.split(':');
-          const [server, port] = serverinfo.split(':');
-          proxies.push({ name, type: 'ss', server, port: parseInt(port, 10), cipher, password, udp: true });
-        }
       }
     } catch (err) {
-      console.log(`[*] 解析单行节点失败 [${line.slice(0, 20)}...]: ${err.message}`);
+      console.log(`[*] 解析节点单行失败 [${line.slice(0, 20)}...]: ${err.message}`);
     }
   }
 
-  // 尝试按 YAML 块解析 `- name:`
+  // 尝试直接解析为 Clash proxies
   if (proxies.length === 0 && (text.includes('- name:') || text.includes('type:'))) {
     try {
       const parsed = YAML.parse(`proxies:\n${text}`);
@@ -187,12 +217,19 @@ async function parseProxyToMihomo(rawInput) {
     'mode': 'rule',
     'log-level': 'warning',
     proxies,
-    rules: [`MATCH,${proxies[0].name}`]
+    'proxy-groups': [
+      {
+        name: 'AUTO_PROXY',
+        type: 'select',
+        proxies: proxies.map(p => p.name)
+      }
+    ],
+    rules: ['MATCH,AUTO_PROXY']
   };
 }
 
 /**
- * 3. 清理环境
+ * 3. 环境清理
  */
 function cleanEnv() {
   console.log('[*] 正在执行环境清理（关闭残留 Mihomo、Chrome 与临时目录）...');
@@ -205,7 +242,7 @@ function cleanEnv() {
 }
 
 /**
- * 4. 代理启动步骤
+ * 4. 代理启动与验证
  */
 async function setupProxy() {
   cleanEnv();
@@ -230,10 +267,10 @@ async function setupProxy() {
   execSync('curl -sL "https://github.com/MetaCubeX/mihomo/releases/download/v1.18.7/mihomo-linux-amd64-v1.18.7.gz" | gzip -d > /tmp/mihomo/mihomo');
   execSync('chmod +x /tmp/mihomo/mihomo');
 
-  // 写入标准 YAML
+  // 生成 config.yaml
   fs.writeFileSync(path.join(CONFIG_DIR, 'config.yaml'), YAML.stringify(mihomoConfig), 'utf-8');
 
-  // 后台运行 Mihomo
+  // 启动后台代理
   console.log('[*] 正在启动 Mihomo 后台代理 (127.0.0.1:7890)...');
   const logFile = fs.openSync(path.join(CONFIG_DIR, 'mihomo.log'), 'a');
   const p = spawn('/tmp/mihomo/mihomo', ['-d', CONFIG_DIR], {
@@ -242,13 +279,13 @@ async function setupProxy() {
   });
   p.unref();
 
-  // 等待启动与连通性验证
-  await new Promise(r => setTimeout(r, 3500));
+  // 等待启动并做连通性测试
+  await new Promise(r => setTimeout(r, 4000));
   try {
-    execSync('curl -s -x http://127.0.0.1:7890 https://www.google.com --connect-timeout 8 > /dev/null');
-    console.log('[+] 本地代理 127.0.0.1:7890 启动成功，外网连通性测试通过！');
+    execSync('curl -s -I -x http://127.0.0.1:7890 https://cp.cloudflare.com/generate_204 --connect-timeout 8 > /dev/null');
+    console.log('[+] 本地代理 127.0.0.1:7890 启动成功，网络连接正常！');
   } catch (e) {
-    console.log('[!] 警告: 代理已启动但测试连接超时，Mihomo 日志如下:');
+    console.log('[!] 提示: 代理已启动并监听，日志如下:');
     try {
       console.log(fs.readFileSync(path.join(CONFIG_DIR, 'mihomo.log'), 'utf-8'));
     } catch (_) {}
@@ -256,7 +293,7 @@ async function setupProxy() {
 }
 
 /**
- * 5. 执行主续期任务
+ * 5. 主续期任务
  */
 async function runRenew() {
   const cookies = sanitizeCookies(COOKIES_RAW);
@@ -264,7 +301,7 @@ async function runRenew() {
     console.error('[!] 错误: 未检测到有效 heavencookies，请检查 Secrets 配置。');
     process.exit(1);
   }
-  console.log(`[+] 成功解析并格式化 ${cookies.length} 个 Cookies。`);
+  console.log(`[+] 成功解析并载入 ${cookies.length} 个 Cookies。`);
 
   const launchOptions = {
     headless: true,
@@ -282,34 +319,32 @@ async function runRenew() {
     viewport: { width: 1440, height: 900 }
   });
 
-  // 注入 Cookies
   await context.addCookies(cookies);
   const page = await context.newPage();
 
-  console.log(`[*] 正在访问目标页面: ${TARGET_URL}`);
+  console.log(`[*] 正在进入目标页面: ${TARGET_URL}`);
   try {
     await page.goto(TARGET_URL, { waitUntil: 'networkidle', timeout: 60000 });
   } catch (e) {
-    console.log(`[*] 网络加载等待超时，继续后续流程: ${e.message}`);
+    console.log(`[*] 页面网络响应耗时较长，继续后续步骤: ${e.message}`);
   }
 
   await page.waitForTimeout(3000);
 
-  // 检查是否重定向到登录页
   if (page.url().includes('/auth/login')) {
-    console.error('[!] Cookies 已失效（重定向至登录页），请更新 Secrets 中的 heavencookies。');
+    console.error('[!] Cookies 已失效（重定向到了登录页面），请更新 heavencookies。');
     await page.screenshot({ path: 'login_failed.png' });
     await browser.close();
     process.exit(1);
   }
 
-  console.log('[+] 登录有效，正在寻找续期按钮模块...');
+  console.log('[+] 登录有效，正在寻找续期倒计时按钮...');
 
   let renewBtn = page.locator('button[title*="renew" i], button[aria-label*="Renews" i], button:has-text("d ")').first();
   let count = await renewBtn.count();
 
   if (count === 0) {
-    console.log('[*] 未直接找到续期按钮，尝试查找 Manage 入口...');
+    console.log('[*] 未直接找到续期按钮，尝试寻找 Manage 入口...');
     const manageBtn = page.locator('a[href*="/overview"], button:has-text("Manage")').first();
     if (await manageBtn.count() > 0) {
       await manageBtn.click();
@@ -332,24 +367,23 @@ async function runRenew() {
       const msg = (await toast.innerText()).trim();
       console.log(`[+] 成功捕获反馈提示: "${msg}"`);
     } else {
-      console.log('[*] 已点击，未抓取到显式提示文本，请通过截图确认。');
+      console.log('[*] 已点击，未抓取到显式提示文本，可通过截图核验。');
     }
   } else {
-    console.log('[!] 未定位到续期按钮，请查看截图核验。');
+    console.log('[!] 未定位到续期按钮，请查看截图排查页面状态。');
   }
 
-  // 截图留存
   await page.screenshot({ path: 'renew_result.png' });
 
-  // 导出最新 Cookies
+  // 提取最新 Cookies
   const latestCookies = await context.cookies();
   fs.writeFileSync('new_cookies.json', JSON.stringify(latestCookies, null, 2), 'utf-8');
-  console.log('[+] 最新会话 Cookies 已导出至 new_cookies.json');
+  console.log('[+] 当前最新会话 Cookies 已导出至 new_cookies.json');
 
   await browser.close();
 }
 
-// CLI 参数分流
+// 命令行分流
 (async () => {
   const arg = process.argv[2];
   if (arg === '--setup-proxy') {

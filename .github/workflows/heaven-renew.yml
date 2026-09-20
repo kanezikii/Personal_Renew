@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -e
+
+ACTION=$1
+CONFIG_DIR="/tmp/mihomo"
+
+clean_env() {
+    echo "[*] 执行进程与代理缓存清理..."
+    pkill -9 -f "mihomo" || true
+    pkill -9 -f "chrome" || true
+    pkill -9 -f "playwright" || true
+    rm -rf "$CONFIG_DIR"
+    rm -f new_cookies.json
+    echo "[+] 清理完毕。"
+}
+
+start_proxy() {
+    clean_env
+    if [ -z "$PROXY_CONFIG" ]; then
+        echo "[*] 未配置 PROXY_CONFIG，将直连执行任务。"
+        exit 0
+    fi
+
+    echo "[*] 正在准备 Mihomo 多协议代理环境..."
+    mkdir -p "$CONFIG_DIR"
+    cd "$CONFIG_DIR"
+
+    # 下载 Mihomo 预编译文件
+    MIHOMO_URL="https://github.com/MetaCubeX/mihomo/releases/download/v1.18.7/mihomo-linux-amd64-v1.18.7.gz"
+    curl -sL "$MIHOMO_URL" | gzip -d > mihomo
+    chmod +x mihomo
+
+    # 写入配置 (支持标准 Clash 节点 YAML 内容或订阅链接)
+   if [[ "$PROXY_CONFIG" =~ ^https?:// ]]; then
+       echo "[*] 检测到代理订阅链接，正在获取配置..."
+       curl -sL "$PROXY_CONFIG" -o config.yaml
+      # 强制设置混合监听端口为 7890
+       sed -i '1i mixed-port: 7890\nallow-lan: false\n' config.yaml
+  else
+       echo "[*] 写入代理配置..."
+      cat <<EOF > config.yaml
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: warning
+$PROXY_CONFIG
+EOF
+    fi
+
+    echo "[*] 启动代理核心..."
+    nohup ./mihomo -d . > mihomo.log 2>&1 &
+    sleep 3
+
+    # 测试本地代理连通性
+    if curl -s -x http://127.0.0.1:7890 https://www.google.com > /dev/null; then
+        echo "[+] 本地代理 127.0.0.1:7890 启动成功且外网连接正常。"
+    else
+        echo "[!] 警告: 本地代理已启动，但外网测试未通过，请检查节点配置。日志如下:"
+        cat mihomo.log
+    fi
+}
+
+case "$ACTION" in
+    start)
+        start_proxy
+        ;;
+    clean)
+        clean_env
+        ;;
+    *)
+        echo "Usage: $0 {start|clean}"
+        exit 1
+        ;;
+esac

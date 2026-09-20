@@ -1,119 +1,148 @@
-import json
-import os
-import sys
-import time
-from playwright.sync_api import sync_playwright
+const fs = require('fs');
+const { chromium } = require('playwright');
 
-SERVER_URL = os.getenv("SERVER_URL", "https://control.heavencloud.in/server/d9063afd/overview")
-COOKIES_STR = os.getenv("COOKIES", "[]")
-PROXY_PORT = os.getenv("LOCAL_PROXY_PORT", "")
+const TARGET_URL = process.env.SERVER_URL || 'https://control.heavencloud.in/server/d9063afd/overview';
+const COOKIES_RAW = process.env.heavencookies || '[]';
+const PROXY_PORT = process.env.LOCAL_PROXY_PORT || '';
 
-def format_cookies(cookies_input):
-    """解析并标准化 Cookies 格式"""
-    try:
-        data = json.loads(cookies_input)
-        if isinstance(data, list):
-            return data
-    except Exception:
-        pass
-    
-    # 兼容 key1=val1; key2=val2 格式
-    formatted = []
-    for item in cookies_input.split(";"):
-        if "=" in item:
-            k, v = item.strip().split("=", 1)
-            formatted.append({
-                "name": k,
-                "value": v,
-                "domain": "control.heavencloud.in",
-                "path": "/"
-            })
-    return formatted
-
-def run():
-    cookies = format_cookies(COOKIES_STR)
-    if not cookies:
-        print("[!] 错误: 未检测到有效 COOKIES，请检查 Secrets 配置。")
-        sys.exit(1)
-
-    with sync_playwright() as p:
-        launch_args = {
-            "headless": True,
-            "args": ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+// 兼容解析 JSON 数组格式与分号拼接键值对格式的 Cookies
+function parseCookies(raw) {
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed.map((item) => {
+        const cookie = {
+          name: item.name,
+          value: item.value,
+          path: item.path || '/'
+        };
+        if (item.domain) {
+          cookie.domain = item.domain;
+        } else {
+          cookie.url = 'https://control.heavencloud.in';
         }
-        
-        # 本地代理配置
-        if PROXY_PORT:
-            launch_args["proxy"] = {"server": f"http://127.0.0.1:{PROXY_PORT}"}
-            print(f"[*] 已挂载本地代理: 127.0.0.1:{PROXY_PORT}")
+        if (item.secure !== undefined) cookie.secure = item.secure;
+        if (item.sameSite) cookie.sameSite = item.sameSite;
+        return cookie;
+      });
+    }
+  } catch (e) {
+    // 文本格式继续向下解析
+  }
 
-        browser = p.chromium.launch(**launch_args)
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-            viewport={"width": 1440, "height": 900}
-        )
+  const cookies = [];
+  const parts = raw.split(';');
+  for (const part of parts) {
+    const idx = part.indexOf('=');
+    if (idx !== -1) {
+      const name = part.slice(0, idx).trim();
+      const value = part.slice(idx + 1).trim();
+      if (name && value) {
+        cookies.push({
+          name,
+          value,
+          domain: 'control.heavencloud.in',
+          path: '/',
+          secure: true,
+          sameSite: 'Lax'
+        });
+      }
+    }
+  }
+  return cookies;
+}
 
-        # 注入 Cookies
-        context.add_cookies(cookies)
-        page = context.new_page()
+(async () => {
+  console.log('[*] 启动 HeavenCloud 续期自动化流程');
 
-        print(f"[*] 正在访问目标页面: {SERVER_URL}")
-        page.goto(SERVER_URL, wait_until="networkidle", timeout=60000)
-        time.sleep(3)
+  const cookies = parseCookies(COOKIES_RAW);
+  if (!cookies || cookies.length === 0) {
+    console.error('[!] 错误: 未解析到有效的 heavencookies，请检查 Secrets 配置。');
+    process.exit(1);
+  }
 
-        # 检查是否被重定向到登录页
-        if "/auth/login" in page.url:
-            print("[!] 登录失效: 页面被重定向至登录页，请更新 COOKIES。")
-            page.screenshot(path="login_failed.png")
-            browser.close()
-            sys.exit(1)
+  const launchOptions = {
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+  };
 
-        print("[+] 登录有效，正在查找续期按钮...")
+  if (PROXY_PORT) {
+    launchOptions.proxy = { server: `http://127.0.0.1:${PROXY_PORT}` };
+    console.log(`[*] 已接入本地网络代理: 127.0.0.1:${PROXY_PORT}`);
+  }
 
-        # 定位续期按钮（结合 HTML 结构特征：属性含 Renews / renew 或包含类似 6d 22h 格式的按钮）
-        renew_btn = page.locator(
-            'button[title*="renew" i], button[aria-label*="Renews" i], button:has-text("d ")'
-        ).first
+  const browser = await chromium.launch(launchOptions);
+  const context = await browser.newContext({
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+    viewport: { width: 1440, height: 900 }
+  });
 
-        if renew_btn.count() == 0:
-            print("[!] 未在当前页面找到续期按钮，尝试查找 Manage 入口...")
-            # 兼容从首页进入的情况
-            manage_btn = page.locator('a[href*="/overview"], button:has-text("Manage")').first
-            if manage_btn.count() > 0:
-                manage_btn.click()
-                page.wait_for_load_state("networkidle")
-                time.sleep(3)
-                renew_btn = page.locator(
-                    'button[title*="renew" i], button[aria-label*="Renews" i], button:has-text("d ")'
-                ).first
+  // 注入 Cookies
+  await context.addCookies(cookies);
+  const page = await context.newPage();
 
-        if renew_btn.count() > 0:
-            btn_text = renew_btn.inner_text().replace("\n", " ").strip()
-            print(f"[*] 找到续期模块/按钮，当前显示状态: [{btn_text}]，执行点击...")
-            renew_btn.click()
-            
-            # 等待绿色 Toast 弹窗消息
-            time.sleep(2)
-            toast = page.locator('div[role="status"] p, div.shadow-panel p').first
-            
-            if toast.count() > 0 and toast.is_visible():
-                toast_msg = toast.inner_text().strip()
-                print(f"[+] 捕获到反馈提示: {toast_msg}")
-            else:
-                print("[*] 点击已执行，未检测到显式 Toast 文本，请查看生成的截图确认状态。")
-        else:
-            print("[!] 未定位到续期按钮，请核对是否已加载到服务器概览界面。")
+  console.log(`[*] 访问目标服务器页面: ${TARGET_URL}`);
+  try {
+    await page.goto(TARGET_URL, { waitUntil: 'networkidle', timeout: 60000 });
+  } catch (err) {
+    console.log(`[*] 页面加载超时或部分资源挂起，继续后续处理: ${err.message}`);
+  }
 
-        # 截图保存现场
-        page.screenshot(path="renew_result.png")
+  await page.waitForTimeout(3000);
 
-        # 提取最新 Cookies
-        latest_cookies = context.cookies()
-        with open("new_cookies.json", "w", encoding="utf-8") as f:
-            json.dump(latest_cookies, f, ensure_ascii=False, indent=2)
-        print("[+] 已成功获取当前会话的最新 Cookies。")
+  // 检查是否跳转回登录页
+  if (page.url().includes('/auth/login')) {
+    console.error('[!] 登录失效: 页面跳转至登录页，请在 Secrets 中重新设置 heavencookies。');
+    await page.screenshot({ path: 'login_failed.png' });
+    await browser.close();
+    process.exit(1);
+  }
 
-        browser.close()
+  console.log('[+] Cookies 登录有效，正在查找续期倒计时按钮...');
 
-if __name__ == "__main__":
-    run()
+  // 定位续期按钮：支持 title/aria-label 包含 renew 或按钮文本带天数（如 6d 22h）
+  let renewBtn = page.locator('button[title*="renew" i], button[aria-label*="Renews" i], button:has-text("d ")').first();
+  let count = await renewBtn.count();
+
+  // 若在控制台首页，尝试查找 Manage 按钮跳转进入概览
+  if (count === 0) {
+    console.log('[*] 未直接发现续期按钮，检测是否存在 Manage 按钮...');
+    const manageBtn = page.locator('a[href*="/overview"], button:has-text("Manage")').first();
+    if (await manageBtn.count() > 0) {
+      await manageBtn.click();
+      await page.waitForLoadState('networkidle').catch(() => {});
+      await page.waitForTimeout(3000);
+      renewBtn = page.locator('button[title*="renew" i], button[aria-label*="Renews" i], button:has-text("d ")').first();
+      count = await renewBtn.count();
+    }
+  }
+
+  if (count > 0) {
+    const btnText = (await renewBtn.innerText()).replace(/\n/g, ' ').trim();
+    console.log(`[*] 找到续期模块 [${btnText}]，触发点击...`);
+    await renewBtn.click();
+
+    await page.waitForTimeout(2500);
+
+    // 抓取绿色 Toast 提示文本 (Too early to renew this one yet.)
+    const toast = page.locator('div[role="status"] p, div.shadow-panel p').first();
+    if (await toast.count() > 0 && await toast.isVisible()) {
+      const msg = (await toast.innerText()).trim();
+      console.log(`[+] 捕获到系统提示: "${msg}"`);
+    } else {
+      console.log('[*] 点击已执行，未抓取到显式提示框，请核验截图。');
+    }
+  } else {
+    console.log('[!] 未定位到续期倒计时按钮，请检查截图。');
+  }
+
+  // 保存现场截图
+  await page.screenshot({ path: 'renew_result.png' });
+
+  // 提取当前最新会话 Cookies 并保存
+  const latestCookies = await context.cookies();
+  fs.writeFileSync('new_cookies.json', JSON.stringify(latestCookies, null, 2), 'utf-8');
+  console.log('[+] 最新 Cookies 已成功写入 new_cookies.json。');
+
+  await browser.close();
+})();

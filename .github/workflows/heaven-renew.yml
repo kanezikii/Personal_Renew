@@ -1,109 +1,110 @@
 name: HeavenCloud Auto Renew
 
 on:
-   schedule:
-   - cron: '0 2,14 * * *'
-   workflow_dispatch: # 支持在 GitHub 控制台手动运行测试
+  schedule:
+    # 每天 UTC 02:00 与 14:00 (北京时间 10:00 与 22:00) 自动执行
+    - cron: '0 2,14 * * *'
+  workflow_dispatch: # 支持在 GitHub Actions 页面手动点击触发
 
- jobs:
- renew:
- runs-on: ubuntu-latest
+jobs:
+  renew:
+    runs-on: ubuntu-latest
 
- steps:
-  - name: 检出仓库代码
-    uses: actions/checkout@v4
+    steps:
+      - name: 检出仓库代码
+        uses: actions/checkout@v4
 
-  - name: 设置 Node.js 环境
-    uses: actions/setup-node@v4
-    with:
-      node-version: 20
+      - name: 设置 Node.js 环境
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
-  - name: 安装 Playwright 及浏览器内核
-    run: |
-      npm init -y
-      npm install playwright
-      npx playwright install chromium --with-deps
+      - name: 安装 Playwright 与浏览器内核
+        run: |
+          npm init -y
+          npm install playwright
+          npx playwright install chromium --with-deps
 
-  - name: 清理旧残留并启动多协议代理 (Mihomo)
-    env:
-      heaven_PROXY_CONFIG: ${{ secrets.heaven_PROXY_CONFIG }}
-    run: |
-      echo "[*] 清理旧进程与历史缓存..."
-      pkill -9 -f "mihomo" || true
-      pkill -9 -f "chrome" || true
-      pkill -9 -f "node" || true
-      rm -rf /tmp/mihomo
-      rm -f new_cookies.json
+      - name: 清理旧进程与启动多协议代理 (Mihomo)
+        env:
+          heaven_PROXY_CONFIG: ${{ secrets.heaven_PROXY_CONFIG }}
+        run: |
+          echo "[*] 清理残留进程与历史临时缓存..."
+          pkill -9 -f "mihomo" || true
+          pkill -9 -f "chrome" || true
+          pkill -9 -f "playwright" || true
+          rm -rf /tmp/mihomo
+          rm -f new_cookies.json
 
-      if [ -n "$heaven_PROXY_CONFIG" ]; then
-        echo "[*] 正在准备 Mihomo 代理环境..."
-        mkdir -p /tmp/mihomo
-        cd /tmp/mihomo
-        
-        # 下载 Mihomo 核心
-        curl -sL "https://github.com/MetaCubeX/mihomo/releases/download/v1.18.7/mihomo-linux-amd64-v1.18.7.gz" | gzip -d > mihomo
-        chmod +x mihomo
+          if [ -n "$heaven_PROXY_CONFIG" ]; then
+            echo "[*] 检测到 heaven_PROXY_CONFIG，部署 Mihomo 代理环境..."
+            mkdir -p /tmp/mihomo
+            cd /tmp/mihomo
 
-        # 判断输入是订阅链接还是 YAML 配置文本
-        if [[ "$heaven_PROXY_CONFIG" =~ ^https?:// ]]; then
-          echo "[*] 检测到代理订阅链接，正在拉取节点配置..."
-          curl -sL "$heaven_PROXY_CONFIG" -o config.yaml
-          sed -i '1i mixed-port: 7890\nallow-lan: false\n' config.yaml
-        else
-          echo "[*] 写入自定义节点配置..."
-          printf "mixed-port: 7890\nallow-lan: false\nmode: rule\nlog-level: warning\n%s\n" "$heaven_PROXY_CONFIG" > config.yaml
-        fi
+            # 下载 Mihomo 预编译内核
+            curl -sL "https://github.com/MetaCubeX/mihomo/releases/download/v1.18.7/mihomo-linux-amd64-v1.18.7.gz" | gzip -d > mihomo
+            chmod +x mihomo
 
-        echo "[*] 启动代理核心..."
-        nohup ./mihomo -d . > mihomo.log 2>&1 &
-        sleep 3
+            # 判断是订阅链接还是 YAML 配置内容
+            if [[ "$heaven_PROXY_CONFIG" =~ ^https?:// ]]; then
+              echo "[*] 从订阅链接拉取节点配置..."
+              curl -sL "$heaven_PROXY_CONFIG" -o config.yaml
+              sed -i '1i mixed-port: 7890\nallow-lan: false\n' config.yaml
+            else
+              echo "[*] 写入自定义节点 YAML 配置..."
+              printf "mixed-port: 7890\nallow-lan: false\nmode: rule\nlog-level: warning\n%s\n" "$heaven_PROXY_CONFIG" > config.yaml
+            fi
 
-        # 本地代理连通性测试
-        if curl -s -x http://127.0.0.1:7890 https://www.google.com > /dev/null; then
-          echo "[+] 本地代理 127.0.0.1:7890 启动成功，网络连通正常。"
-        else
-          echo "[!] 警告: 本地代理已启动，但外网测试未响应，核心日志如下:"
-          cat mihomo.log
-        fi
-      else
-        echo "[*] 未提供 heaven_PROXY_CONFIG，默认采用直连模式。"
-      fi
+            echo "[*] 后台启动 Mihomo..."
+            nohup ./mihomo -d . > mihomo.log 2>&1 &
+            sleep 3
 
-  - name: 执行自动化续期脚本
-    env:
-      SERVER_URL: "https://control.heavencloud.in/server/d9063afd/overview"
-      heavencookies: ${{ secrets.heavencookies }}
-      LOCAL_PROXY_PORT: ${{ secrets.heaven_PROXY_CONFIG != '' && '7890' || '' }}
-    run: |
-      node heaven-renew.js
+            # 连通性测试
+            if curl -s -x http://127.0.0.1:7890 https://www.google.com > /dev/null; then
+              echo "[+] 代理已启动，127.0.0.1:7890 连接正常！"
+            else
+              echo "[!] 代理启动完成但测试外网受阻，输出日志排查："
+              cat mihomo.log
+            fi
+          else
+            echo "[*] 未配置 heaven_PROXY_CONFIG，采用直连网络执行任务。"
+          fi
 
-  - name: 自动更新并覆写 Secrets 中的 heavencookies
-    if: success()
-    env:
-      GH_TOKEN: ${{ secrets.GH_PAT }}
-    run: |
-      if [ -f "new_cookies.json" ] && [ -n "$GH_TOKEN" ]; then
-        echo "[*] 检测到新生成的 Cookies，正在调用 GitHub CLI 覆写更新..."
-        gh secret set heavencookies --repo "${{ github.repository }}" < new_cookies.json
-        echo "[+] Secrets.heavencookies 覆写完成！"
-      else
-        echo "[*] 跳过覆写: 未找到 new_cookies.json 或未配置 GH_PAT (需赋予 Repo secrets 写入权限)。"
-      fi
+      - name: 执行自动化续期脚本
+        env:
+          SERVER_URL: "https://control.heavencloud.in/server/d9063afd/overview"
+          heavencookies: ${{ secrets.heavencookies }}
+          heaven_PROXY_CONFIG: ${{ secrets.heaven_PROXY_CONFIG }}
+        run: |
+          node heaven-renew.js
 
-  - name: 上传执行截图留存
-    if: always()
-    uses: actions/upload-artifact@v4
-    with:
-      name: renew-screenshot
-      path: |
-        *.png
-      retention-days: 3
+      - name: 自动更新覆写 Secrets 中的 heavencookies
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if [ -f "new_cookies.json" ] && [ -n "$GH_TOKEN" ]; then
+            echo "[*] 检测到新 Cookies，正在通过 GitHub CLI 写回 Secrets.heavencookies..."
+            gh secret set heavencookies --repo "${{ github.repository }}" < new_cookies.json
+            echo "[+] heavencookies 自动更新覆写成功！"
+          else
+            echo "[*] 跳过更新: 未生成 new_cookies.json 或仓库未配置 GH_PAT。"
+          fi
 
-  - name: 强制清理环境与后台进程
-    if: always()
-    run: |
-      echo "[*] 执行收尾工作，清理临时代理缓存与后台残留..."
-      pkill -9 -f "mihomo" || true
-      pkill -9 -f "chrome" || true
-      pkill -9 -f "node" || true
-      rm -rf /tmp/mihomo
+      - name: 上传执行现场截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: renew-screenshot
+          path: |
+            *.png
+          retention-days: 3
+
+      - name: 强制清理进程与代理缓存
+        if: always()
+        run: |
+          echo "[*] 任务结束，彻底清理临时缓存与后台进程..."
+          pkill -9 -f "mihomo" || true
+          pkill -9 -f "chrome" || true
+          pkill -9 -f "playwright" || true
+          rm -rf /tmp/mihomo

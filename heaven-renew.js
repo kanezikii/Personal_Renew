@@ -398,7 +398,7 @@ async function runRenew() {
       afterStatus = (await toast.innerText()).trim();
       console.log(`[+] 成功捕获反馈提示: "${afterStatus}"`);
     } else {
-      afterStatus = '已点击触发，未弹出文本提示（可能已自动延长）';
+      afterStatus = '已点击触发，未弹出文本提示';
       console.log(`[*] ${afterStatus}`);
     }
   } else {
@@ -417,11 +417,11 @@ async function runRenew() {
   await browser.close();
 
   // 3. 构建并发送 Telegram 通知
-  const tgNotice = `💗主人，HeavenCloud 服务器续期结果汇报如下：\n\n` +
-    `⏰ 点击前的时间：${beforeClickTime}\n` +
-    `📌 点击后的状态：${afterStatus}\n` +
+  const tgNotice = `💗主人，HeavenCloud 续期结果汇报：\n\n` +
+    `⏰ 当前时间：${beforeClickTime}\n` +
+    `📌 续期状态：${afterStatus}\n` +
     `🕒 执行时间：${getBeijingTime()} (北京时间)\n` +
-    `🍪 Secrets 覆写：新 Cookies 已提取，正在同步更新覆盖`;
+    `🍪 Secrets 覆写：Cookies 已提取更新覆盖`;
 
   await sendTelegramNotification(tgNotice);
 }

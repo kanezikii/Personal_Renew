@@ -1,16 +1,15 @@
 name: HeavenCloud Auto Renew
 
 on:
-schedule:
-# 每天 UTC 时间 02:00 与 14:00 自动执行
-- cron: '0 2,14 * * *'
-workflow_dispatch: # 支持在 GitHub 控制台手动运行测试
+   schedule:
+   - cron: '0 2,14 * * *'
+   workflow_dispatch: # 支持在 GitHub 控制台手动运行测试
 
-jobs:
-renew:
-runs-on: ubuntu-latest
+ jobs:
+ renew:
+ runs-on: ubuntu-latest
 
-steps:
+ steps:
   - name: 检出仓库代码
     uses: actions/checkout@v4
 

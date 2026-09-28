@@ -13,10 +13,10 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
       - name: ⚙ 设置 Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
@@ -28,10 +28,11 @@ jobs:
           seleniumbase install chromedriver
 
       - name: ⚙ 设置代理 (sing-box)
+        if: env.NODE_LINK != ''
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
-          bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
+          bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh) || true
 
       - name: 🚀 运行续期脚本
         env:
@@ -39,8 +40,24 @@ jobs:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          MWS_COOKIES: ${{ secrets.MWS_COOKIES }}
+          IS_PROXY: ${{ secrets.NODE_LINK != '' }}
+          HEADLESS: "true"
         run: |
-          xvfb-run --auto-servernum python3 app.py
+          xvfb-run --auto-servernum python3 mwsrenew.py
+
+      - name: 💾 更新 Cookies 到 Secrets
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if [ -f "cookies.json" ] && [ -s "cookies.json" ]; then
+            echo "检测到 cookies.json，正在通过 GH_PAT 更新 MWS_COOKIES Secret..."
+            gh secret set MWS_COOKIES < cookies.json
+            echo "✅ MWS_COOKIES 已成功覆盖保存"
+          else
+            echo "ℹ️ 本次未生成有效 cookies.json，跳过更新"
+          fi
 
       - name: 🧽 清理进程和临时文件
         if: always()
@@ -49,12 +66,12 @@ jobs:
           pkill -f chromedriver || true
           pkill -f chrome || true
           pkill -f Xvfb || true
-          rm -f sing-box sing-box-config.json sing-box.log
+          rm -f sing-box sing-box-config.json sing-box.log cookies.json || true
 
       - name: 🧹 清理旧的工作流运行记录
         if: always()
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
         run: |
           runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
           count=0

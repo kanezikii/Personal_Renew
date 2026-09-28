@@ -1,4 +1,4 @@
-name: Auto renew puratya
+name: Auto renew mws
 
 on:
   schedule:

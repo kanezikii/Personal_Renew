@@ -53,7 +53,7 @@ def format_notification(status: str, extra: str = "", error: str = "") -> str:
         masked_email = "MWS 用户"
 
     lines = [
-        "🚀 MWS 自动续期通知",
+        "💗主人,MWS 自动续期通知",
         "",
         f"📌 状态: {status}",
     ]

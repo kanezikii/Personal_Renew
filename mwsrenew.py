@@ -308,9 +308,8 @@ def switch_sidebar_menu(sb, target_name: str):
 
 
 def handle_possible_dialogs_and_captcha(sb):
-    """检测并确认弹出的确认对话框或 Turnstile 人机验证"""
+    """检测并确认可能弹出的确认对话框或 Turnstile 人机验证"""
     sb.sleep(1)
-    # 1. 尝试处理 Turnstile 验证码
     try:
         if sb.is_element_present("iframe[src*='challenges.cloudflare.com']") or sb.is_element_present("iframe[src*='turnstile']"):
             print("   🛡️ 检测到 Cloudflare Turnstile 验证，尝试自动解决...")
@@ -322,7 +321,6 @@ def handle_possible_dialogs_and_captcha(sb):
     except Exception:
         pass
 
-    # 2. 检查可能出现的确认弹窗
     js_modal = """
     const buttons = Array.from(document.querySelectorAll('.modal button, [role="dialog"] button, div[class*="modal"] button'));
     const confirmBtn = buttons.find(b => {
@@ -343,8 +341,8 @@ def handle_possible_dialogs_and_captcha(sb):
         pass
 
 
-def execute_card_action(sb, kind: str, oid: str or int, is_stopped: bool = False) -> bool:
-    """定位卡片并派发真实的物理 CDP 点击事件"""
+def execute_renew(sb, kind: str, oid: str or int) -> bool:
+    """第一步：只执行续期点击"""
     zoom_attr = f"{kind.lower()}-{oid}"
     card_sel = f'[data-zoom-id="{zoom_attr}"]'
 
@@ -355,19 +353,6 @@ def execute_card_action(sb, kind: str, oid: str or int, is_stopped: bool = False
     sb.scroll_to(card_sel)
     sb.sleep(1)
 
-    # 1. 如果已停机，尝试先启动或在续期后启动
-    if is_stopped:
-        start_sel = f'{card_sel} button:contains("启动"), {card_sel} button:contains("Start")'
-        if sb.is_element_present(start_sel):
-            print("   ⚡ 实例处于 STOPPED 状态，尝试点击「启动」...")
-            try:
-                sb.click(start_sel)
-                sb.sleep(3)
-                handle_possible_dialogs_and_captcha(sb)
-            except Exception as e:
-                print(f"   ⚠️ 点击启动出现异常: {e}")
-
-    # 2. 定位并物理点击「续期」按钮
     renew_selectors = [
         f'{card_sel} button:contains("续期")',
         f'{card_sel} button:contains("Renew")',
@@ -380,7 +365,6 @@ def execute_card_action(sb, kind: str, oid: str or int, is_stopped: bool = False
             break
 
     if not target_btn:
-        # 兜底：如果文字匹配未命中，卡片操作栏第 2 个通常为续期按钮
         try:
             buttons = sb.find_elements(f"{card_sel} button")
             if len(buttons) >= 2:
@@ -393,16 +377,34 @@ def execute_card_action(sb, kind: str, oid: str or int, is_stopped: bool = False
         return False
 
     try:
-        # 使用 Selenium 原生物理点击（isTrusted=True）
         sb.click(target_btn)
-        print("   👉 已派发原生物理点击指令")
-        sb.sleep(2)
+        print("   👉 已派发原生物理点击指令（续期）")
         handle_possible_dialogs_and_captcha(sb)
-        sb.sleep(3)
         return True
     except Exception as e:
-        print(f"   ❌ 原生点击失败: {e}")
+        print(f"   ❌ 续期点击失败: {e}")
         return False
+
+
+def execute_start(sb, kind: str, oid: str or int):
+    """第二步：续期生效后，若原先为停机状态则拉起服务"""
+    zoom_attr = f"{kind.lower()}-{oid}"
+    card_sel = f'[data-zoom-id="{zoom_attr}"]'
+    start_selectors = [
+        f'{card_sel} button:contains("启动")',
+        f'{card_sel} button:contains("Start")',
+    ]
+    for sel in start_selectors:
+        if sb.is_element_present(sel):
+            print("   ⚡ 续期完成，正在启动实例...")
+            try:
+                sb.click(sel)
+                sb.sleep(3)
+                handle_possible_dialogs_and_captcha(sb)
+                print("   ✅ 已触发启动指令")
+            except Exception as e:
+                print(f"   ⚠️ 启动操作异常: {e}")
+            break
 
 
 def get_items_via_api(sb, kind: str) -> list:
@@ -450,7 +452,6 @@ def main():
 
         logged_in = False
 
-        # 1. 尝试使用现有 Cookie 免密登录
         if MWS_COOKIES:
             print("🍪 检测到现有 MWS_COOKIES，尝试免密登录...")
             if inject_cookies_to_browser(sb, MWS_COOKIES):
@@ -461,7 +462,6 @@ def main():
                 else:
                     print("⚠️ Cookie 已失效，准备使用 Discord 重新登录...")
 
-        # 2. 回退至 Discord OAuth 模拟授权
         if not logged_in:
             print("🔄 启动 Discord OAuth 授权登录...")
             if do_discord_login(sb, proxy_server if is_proxy else ""):
@@ -474,21 +474,18 @@ def main():
             send_telegram_message(format_notification("❌ 登录失败", error=err))
             sys.exit(1)
 
-        # 3. 保存最新 Cookies 供 Actions 步骤回写
         save_cookies_to_file(sb, "cookies.json")
 
         all_results = []
         total_count = 0
         success_count = 0
 
-        # 4. 分别扫描并处理 Bot 和 Web
         for kind, menu_name in [("Bot", "Bot"), ("Site", "Web")]:
             items = get_items_via_api(sb, kind)
             print(f"\n📋 共获取到 {len(items)} 个 {kind} 实例")
             if not items:
                 continue
 
-            # 切换视图
             switch_sidebar_menu(sb, menu_name)
 
             for it in items:
@@ -502,42 +499,48 @@ def main():
                 status_icon = "🟢" if status == "RUNNING" else "🔴"
                 info = f"{status_icon} [{kind}] {name} (id:{oid}) | 剩余: {rem_before}h"
 
-                # 如果剩余时间接近满额（>=166h），说明刚续期过且正常运行，无需重复操作
+                # 剩余时间充裕且仍在运行中
                 if rem_before is not None and int(rem_before) >= 166 and not is_stopped:
                     print(f"   ⏩ [{name}] 剩余时间充足 ({rem_before}h)，无需重复操作")
                     all_results.append(f"{info}\n📋 结果: ⏩ 冷却中 (无需续期)")
                     success_count += 1
                     continue
 
-                print(f"👉 正在对 [{name}] 执行操作 (状态: {status})...")
-                execute_card_action(sb, kind, oid, is_stopped=is_stopped)
+                print(f"👉 正在对 [{name}] 执行续期操作 (当前: {rem_before}h, 状态: {status})...")
+                execute_renew(sb, kind, oid)
 
-                # 刷新并重新检查数据
-                sb.sleep(3)
+                # 轮询等待后端数据库同步更新（最多等 10 秒）
+                is_renewed = False
+                rem_after = rem_before
+                for _ in range(3):
+                    sb.sleep(3)
+                    fresh_items = get_items_via_api(sb, kind)
+                    fresh_it = next((x for x in fresh_items if str(x["id"]) == str(oid)), None)
+                    if fresh_it:
+                        rem_after = fresh_it["remaining"]
+                        if rem_after is not None and rem_before is not None:
+                            if int(rem_after) > int(rem_before) or int(rem_after) >= 160:
+                                is_renewed = True
+                                break
+
+                # 续期成功后，若原本已停机，则唤醒启动
+                if is_renewed and is_stopped:
+                    execute_start(sb, kind, oid)
+                    sb.sleep(3)
+
                 fresh_items = get_items_via_api(sb, kind)
-                fresh_it = next((x for x in fresh_items if str(x["id"]) == str(oid)), None)
-                rem_after = fresh_it["remaining"] if fresh_it else rem_before
-                fresh_status = str(fresh_it["status"]).upper() if fresh_it else status
+                final_it = next((x for x in fresh_items if str(x["id"]) == str(oid)), None)
+                final_status = str(final_it["status"]).upper() if final_it else status
+                final_rem = final_it["remaining"] if final_it else rem_after
 
-                # 判定条件：时间恢复增加，或者已恢复正常运行状态
-                is_ok = False
-                if rem_before is not None and rem_after is not None:
-                    if int(rem_after) > int(rem_before):
-                        is_ok = True
-                    elif int(rem_after) >= 160:
-                        is_ok = True
-                if fresh_status == "RUNNING" and status == "STOPPED":
-                    is_ok = True
-
-                if is_ok:
+                if is_renewed:
                     success_count += 1
-                    print(f"   ✅ [{name}] 续期/恢复成功: {rem_before}h → {rem_after}h ({fresh_status})")
-                    all_results.append(f"{info} → {rem_after}h [{fresh_status}]\n📋 结果: ✅ 续期成功")
+                    print(f"   ✅ [{name}] 续期成功: {rem_before}h → {final_rem}h ({final_status})")
+                    all_results.append(f"{info} → {final_rem}h [{final_status}]\n📋 结果: ✅ 续期成功")
                 else:
-                    print(f"   ❌ [{name}] 续期未生效 (当前: {rem_after}h, {fresh_status})")
-                    all_results.append(f"{info} → {rem_after}h [{fresh_status}]\n📋 结果: ❌ 续期未生效")
+                    print(f"   ❌ [{name}] 续期未生效 (当前: {final_rem}h, {final_status})")
+                    all_results.append(f"{info} → {final_rem}h [{final_status}]\n📋 结果: ❌ 续期未生效")
 
-        # 5. 汇总通知
         if total_count == 0:
             msg = "账号下未获取到任何 Bot 或 Site 实例"
             print(f"⚠️ {msg}")

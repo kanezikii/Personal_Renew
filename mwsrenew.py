@@ -396,8 +396,17 @@ def handle_possible_dialogs_and_captcha(sb):
 
 
 def execute_card_button_click(sb, card_sel: str, btn_keywords: list, action_name: str) -> bool:
-    """在指定卡片内定位包含特定关键词的按钮并物理派发点击"""
+    """在指定卡片内定位按钮并物理派发点击（含动态重获取与遮罩穿透兜底）"""
     try:
+        # 1. 动态重新检查卡片存在性，防止页面局部重渲染导致节点失效
+        if not sb.is_element_present(card_sel):
+            print(f"   ⚠️ 未定位到卡片: {card_sel}")
+            return False
+
+        sb.scroll_to_element(card_sel)
+        sb.sleep(1)
+
+        # 2. 动态重新获取卡片内部最新的按钮集合
         buttons = sb.find_elements(f"{card_sel} button")
         target_btn = None
         for b in buttons:
@@ -413,21 +422,27 @@ def execute_card_button_click(sb, card_sel: str, btn_keywords: list, action_name
             print(f"   ⚠️ 未在卡片内定位到「{action_name}」按钮")
             return False
 
-        target_btn.click()
+        # 3. 优先尝试原生物理点击；若遇遮罩拦截，则无缝切换 JS 穿透点击
+        try:
+            target_btn.click()
+        except Exception as click_err:
+            print(f"   ℹ️ 原生点击被拦截 ({type(click_err).__name__})，尝试 JS 穿透触发...")
+            sb.execute_script("arguments[0].click();", target_btn)
+
         print(f"   👉 已触发「{action_name}」按钮指令")
-        sb.sleep(2)
+        sb.sleep(3)
         handle_possible_dialogs_and_captcha(sb)
 
-        # 打印点击后产生的网络请求细节
+        # 打印点击后产生的网络日志
         logs = get_latest_network_logs(sb)
         for log in logs:
-            if "/api/" in log.get("url", ""):
-                print(f"      🌐 [API] {log.get('method')} {log.get('url')} -> HTTP {log.get('status')} | {log.get('body')}")
+            url = log.get("url", "")
+            if "/api/" in url or "challenge" in url or "turnstile" in url:
+                print(f"      🌐 [API] {log.get('method')} {url} -> HTTP {log.get('status')} | {log.get('body')}")
         return True
     except Exception as e:
         print(f"   ❌ 点击「{action_name}」失败: {e}")
         return False
-
 
 def get_items_via_api(sb, kind: str) -> list:
     path = "/api/bots" if kind == "Bot" else "/api/sites"

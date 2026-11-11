@@ -180,7 +180,7 @@ def browser_api_get(sb, path: str) -> dict:
             });
             let text = await res.text();
             let parsed = null;
-            try { parsed = JSON.parse(text); } catch (e) { parsed = text; }
+            try { parsed = JSON.parse(text); } catch (e) {}
             callback({ ok: res.ok, status: res.status, data: parsed });
         } catch (err) {
             callback({ ok: false, status: 0, error: String(err) });
@@ -343,62 +343,71 @@ def switch_sidebar_menu(sb, target_name: str):
     sb.sleep(3)
 
 
-def handle_possible_dialogs_and_captcha(sb):
-    """检测并确认可能弹出的确认对话框或 Turnstile 人机验证"""
-    sb.sleep(1)
-    # 1. 尝试检测并点击 Turnstile
-    try:
-        if sb.is_element_present("iframe[src*='challenges.cloudflare.com']") or sb.is_element_present("iframe[src*='turnstile']"):
-            print("   🛡️ 检测到 Cloudflare Turnstile 验证，尝试自动解决...")
-            try:
-                sb.click_turnstile_if_present()
-            except Exception:
-                pass
-            sb.sleep(3)
-    except Exception:
-        pass
+def handle_possible_dialogs_and_captcha(sb, max_wait: int = 10):
+    """循环检测并处理弹出的 Cloudflare Turnstile 验证码及确认对话框"""
+    for _ in range(max_wait):
+        sb.sleep(1)
+        
+        # 1. 尝试检测并解决 Turnstile 人机验证
+        try:
+            if sb.is_element_present("iframe[src*='challenges.cloudflare.com']") or sb.is_element_present("iframe[src*='turnstile']"):
+                print("   🛡️ 检测到 Cloudflare Turnstile 人机验证，正在自动穿透解决...")
+                try:
+                    sb.click_turnstile_if_present()
+                except Exception:
+                    pass
+                sb.sleep(2)
+        except Exception:
+            pass
 
-    # 2. 检测全屏或浮层中的确认按钮
-    js_modal = """
-    // 扫描所有可见且处于较高层级的弹窗按钮
-    const candidates = Array.from(document.querySelectorAll('button')).filter(b => {
-        let el = b;
-        let isOverlay = false;
-        while (el && el !== document.body) {
-            const st = window.getComputedStyle(el);
-            if (st.position === 'fixed' || st.position === 'absolute' || parseInt(st.zIndex || '0') > 10) {
-                isOverlay = true;
-                break;
+        # 2. 检测全屏或浮层中的确认按钮
+        js_modal = """
+        const candidates = Array.from(document.querySelectorAll('button')).filter(b => {
+            let el = b;
+            let isOverlay = false;
+            while (el && el !== document.body) {
+                const st = window.getComputedStyle(el);
+                if (st.position === 'fixed' || st.position === 'absolute' || parseInt(st.zIndex || '0') > 10) {
+                    isOverlay = true;
+                    break;
+                }
+                el = el.parentElement;
             }
-            el = el.parentElement;
+            return isOverlay;
+        });
+
+        const keywords = ['confirm', 'renew', 'start', '确认', '确定', '续期', '启动', '延長', 'はい', 'ok'];
+        const confirmBtn = candidates.find(b => {
+            const t = (b.textContent || '').trim().toLowerCase();
+            return keywords.some(k => t.includes(k));
+        });
+
+        if (confirmBtn) {
+            confirmBtn.click();
+            return true;
         }
-        return isOverlay;
-    });
+        return false;
+        """
+        try:
+            if sb.execute_script(js_modal):
+                print("   👉 已确认弹层对话框")
+                sb.sleep(2)
+                break
+        except Exception:
+            pass
 
-    const keywords = ['confirm', 'renew', 'start', '确认', '确定', '续期', '启动', '延長', 'はい', 'ok'];
-    const confirmBtn = candidates.find(b => {
-        const t = (b.textContent || '').trim().toLowerCase();
-        return keywords.some(k => t.includes(k));
-    });
-
-    if (confirmBtn) {
-        confirmBtn.click();
-        return true;
-    }
-    return false;
-    """
-    try:
-        if sb.execute_script(js_modal):
-            print("   👉 已确认弹层对话框")
-            sb.sleep(2)
-    except Exception:
-        pass
+        # 检查是否已有 /renew 相关的网络响应返回
+        logs = get_latest_network_logs(sb)
+        has_renew_req = any("/renew" in l.get("url", "") for l in logs)
+        if has_renew_req:
+            for log in logs:
+                print(f"      🌐 [API] {log.get('method')} {log.get('url')} -> HTTP {log.get('status')} | {log.get('body')}")
+            break
 
 
 def execute_card_button_click(sb, card_sel: str, btn_keywords: list, action_name: str) -> bool:
-    """在指定卡片内定位按钮并物理派发点击（含动态重获取与遮罩穿透兜底）"""
+    """定位按钮，等待禁用态解除，并派发真实完整的点击事件"""
     try:
-        # 1. 动态重新检查卡片存在性，防止页面局部重渲染导致节点失效
         if not sb.is_element_present(card_sel):
             print(f"   ⚠️ 未定位到卡片: {card_sel}")
             return False
@@ -406,43 +415,56 @@ def execute_card_button_click(sb, card_sel: str, btn_keywords: list, action_name
         sb.scroll_to_element(card_sel)
         sb.sleep(1)
 
-        # 2. 动态重新获取卡片内部最新的按钮集合
-        buttons = sb.find_elements(f"{card_sel} button")
+        # 等待按钮处于可用状态（最多等 10 秒，避免开机过渡期 disabled）
         target_btn = None
-        for b in buttons:
-            txt = (b.text or "").strip().lower()
-            if any(k.lower() in txt for k in btn_keywords):
-                target_btn = b
-                break
+        for _ in range(10):
+            buttons = sb.find_elements(f"{card_sel} button")
+            for b in buttons:
+                txt = (b.text or "").strip().lower()
+                if any(k.lower() in txt for k in btn_keywords):
+                    target_btn = b
+                    break
 
-        if not target_btn and len(buttons) >= 2 and "续期" in btn_keywords:
-            target_btn = buttons[1]
+            if not target_btn and len(buttons) >= 2 and "续期" in btn_keywords:
+                target_btn = buttons[1]
+
+            if target_btn and target_btn.is_enabled() and target_btn.get_attribute("disabled") is None:
+                break
+            sb.sleep(1)
 
         if not target_btn:
             print(f"   ⚠️ 未在卡片内定位到「{action_name}」按钮")
             return False
 
-        # 3. 优先尝试原生物理点击；若遇遮罩拦截，则无缝切换 JS 穿透点击
+        btn_txt = (target_btn.text or "").strip()
+        is_disabled = target_btn.get_attribute("disabled") is not None
+        print(f"   🎯 选定目标按钮: [{btn_txt}] (disabled: {is_disabled})")
+
+        # 触发完整鼠标事件序列，确保触发 React / Next.js 的合成事件监听
+        js_dispatch_click = """
+        const btn = arguments[0];
+        btn.scrollIntoView({ block: 'center' });
+        ['mouseenter', 'mouseover', 'mousedown', 'mouseup', 'click'].forEach(eventType => {
+            btn.dispatchEvent(new MouseEvent(eventType, {
+                view: window,
+                bubbles: true,
+                cancelable: true,
+                buttons: 1
+            }));
+        });
+        """
         try:
             target_btn.click()
-        except Exception as click_err:
-            print(f"   ℹ️ 原生点击被拦截 ({type(click_err).__name__})，尝试 JS 穿透触发...")
-            sb.execute_script("arguments[0].click();", target_btn)
+        except Exception:
+            sb.execute_script(js_dispatch_click, target_btn)
 
-        print(f"   👉 已触发「{action_name}」按钮指令")
-        sb.sleep(3)
-        handle_possible_dialogs_and_captcha(sb)
-
-        # 打印点击后产生的网络日志
-        logs = get_latest_network_logs(sb)
-        for log in logs:
-            url = log.get("url", "")
-            if "/api/" in url or "challenge" in url or "turnstile" in url:
-                print(f"      🌐 [API] {log.get('method')} {url} -> HTTP {log.get('status')} | {log.get('body')}")
+        print(f"   👉 已触发「{action_name}」按钮指令，等待响应与人机验证...")
+        handle_possible_dialogs_and_captcha(sb, max_wait=8)
         return True
     except Exception as e:
         print(f"   ❌ 点击「{action_name}」失败: {e}")
         return False
+
 
 def get_items_via_api(sb, kind: str) -> list:
     path = "/api/bots" if kind == "Bot" else "/api/sites"
@@ -511,7 +533,6 @@ def main():
             send_telegram_message(format_notification("❌ 登录失败", error=err))
             sys.exit(1)
 
-        # 挂载网络请求拦截器，实时追踪页面调用的所有 API
         setup_network_interceptor(sb)
         save_cookies_to_file(sb, "cookies.json")
 
@@ -533,7 +554,7 @@ def main():
                 name = it["name"]
                 rem_before = it["remaining"]
                 status = str(it["status"]).upper()
-                is_stopped = (status == "STOPPED") or (rem_before == 0)
+                is_stopped = (status == "STOPPED")
 
                 status_icon = "🟢" if status == "RUNNING" else "🔴"
                 info = f"{status_icon} [{kind}] {name} (id:{oid}) | 剩余: {rem_before}h"
@@ -554,22 +575,23 @@ def main():
                     all_results.append(f"{info}\n📋 结果: ⚠️ 未定位到卡片")
                     continue
 
-                sb.scroll_to(card_sel)
+                sb.scroll_to_element(card_sel)
                 sb.sleep(1)
 
-                # 核心机制：若处于停机或 0h 状态，先点击启动唤醒容器
+                # 1. 若处于停机状态，先点「启动」
                 if is_stopped:
-                    print("   ⚡ 检测到实例处于 STOPPED / 0h 状态，先执行「启动」...")
+                    print("   ⚡ 检测到实例处于 STOPPED 状态，先执行「启动」...")
                     execute_card_button_click(sb, card_sel, ["启动", "start"], "启动")
-                    sb.sleep(5)
+                    print("   ⏳ 等待容器初始化并就绪 (8秒)...")
+                    sb.sleep(8)
 
-                # 执行「续期」点击重置倒计时
+                # 2. 执行「续期」点击
                 execute_card_button_click(sb, card_sel, ["续期", "renew", "延長"], "续期")
 
-                # 等待后端异步写入
+                # 3. 轮询等待后端数据库同步与倒计时重置
                 is_renewed = False
                 rem_after = rem_before
-                for _ in range(3):
+                for _ in range(4):
                     sb.sleep(3)
                     fresh_items = get_items_via_api(sb, kind)
                     fresh_it = next((x for x in fresh_items if str(x["id"]) == str(oid)), None)
@@ -580,18 +602,10 @@ def main():
                                 is_renewed = True
                                 break
 
-                # 若成功续期后状态仍为 STOPPED，再次尝试启动拉起服务
                 fresh_items = get_items_via_api(sb, kind)
                 final_it = next((x for x in fresh_items if str(x["id"]) == str(oid)), None)
                 final_status = str(final_it["status"]).upper() if final_it else status
                 final_rem = final_it["remaining"] if final_it else rem_after
-
-                if is_renewed and final_status == "STOPPED":
-                    execute_card_button_click(sb, card_sel, ["启动", "start"], "启动拉起")
-                    sb.sleep(3)
-                    fresh_items = get_items_via_api(sb, kind)
-                    final_it = next((x for x in fresh_items if str(x["id"]) == str(oid)), None)
-                    final_status = str(final_it["status"]).upper() if final_it else final_status
 
                 if is_renewed or (final_rem is not None and int(final_rem) >= 160):
                     success_count += 1

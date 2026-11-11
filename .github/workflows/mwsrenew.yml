@@ -42,7 +42,7 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           MWS_COOKIES: ${{ secrets.MWS_COOKIES }}
           IS_PROXY: ${{ secrets.NODE_LINK != '' }}
-          HEADLESS: "true"
+          HEADLESS: "false"   # 关键：借助 xvfb 运行真实桌面模式，完美过 Turnstile
         run: |
           xvfb-run --auto-servernum python3 mwsrenew.py
 

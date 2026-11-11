@@ -11,6 +11,7 @@ import requests
 from seleniumbase import SB
 
 BASE_URL      = "https://cloud.m-ws.cc"
+DASH_URL      = f"{BASE_URL}/dash"
 EMAIL         = os.environ.get("EMAIL") or ""
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN") or ""
 TG_CHAT_ID    = os.environ.get("TG_CHAT_ID") or ""
@@ -22,8 +23,7 @@ if DISCORD_TOKEN:
     _parts = DISCORD_TOKEN.split(",", 1)
     DC_TOKEN = _parts[-1].strip()
 
-DISCORD_API = "https://discord.com/api/v9/oauth2/authorize"
-DISCORD_UA  = (
+DISCORD_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
@@ -53,7 +53,7 @@ def format_notification(status: str, extra: str = "", error: str = "") -> str:
         masked_email = "MWS 用户"
 
     lines = [
-        "💗主人,MWS 自动续期通知",
+        "🚀 MWS 自动续期通知",
         "",
         f"📌 状态: {status}",
     ]
@@ -77,7 +77,6 @@ def get_current_ip(proxy_server: str = "") -> str:
 
 
 def inject_cookies_to_browser(sb, cookies_raw: str) -> bool:
-    """支持 JSON 数组、JSON 对象或纯 token 字符串注入"""
     if not cookies_raw:
         return False
     try:
@@ -102,7 +101,6 @@ def inject_cookies_to_browser(sb, cookies_raw: str) -> bool:
             for k, v in cookies.items():
                 sb.driver.add_cookie({"name": k, "value": str(v), "domain": target_domain, "path": "/"})
         else:
-            # 兼容纯 token 或 key=value
             val = cookies_raw.split("=", 1)[-1].strip()
             sb.driver.add_cookie({
                 "name": "__Host-mrtcloud_token",
@@ -112,7 +110,7 @@ def inject_cookies_to_browser(sb, cookies_raw: str) -> bool:
                 "secure": True
             })
 
-        sb.open(f"{BASE_URL}/")
+        sb.open(DASH_URL)
         sb.wait_for_ready_state_complete()
         sb.sleep(3)
         return True
@@ -122,7 +120,6 @@ def inject_cookies_to_browser(sb, cookies_raw: str) -> bool:
 
 
 def save_cookies_to_file(sb, filepath: str = "cookies.json"):
-    """持久化保存当前有效的 Cookies"""
     try:
         cookies = sb.driver.get_cookies()
         if cookies:
@@ -131,35 +128,24 @@ def save_cookies_to_file(sb, filepath: str = "cookies.json"):
             print(f"💾 成功导出 {len(cookies)} 个 Cookie 到 {filepath}")
             return True
     except Exception as e:
-        print(f"⚠️ 导出 Cookie 文件失败: {e}")
+        print(f"⚠️ 导出 Cookie 失败: {e}")
     return False
 
 
-def browser_api_request(sb, path: str, method: str = "GET", body: dict = None) -> dict:
-    """在具备真实 Cloudflare 会话与 Cookie 态的浏览器内部执行 fetch 调用"""
+def browser_api_get(sb, path: str) -> dict:
+    """在浏览器内执行 GET 请求拉取数据（不会触发 403 限制）"""
     js = """
-    const [path, method, body, callback] = [arguments[0], arguments[1], arguments[2], arguments[3]];
+    const [path, callback] = [arguments[0], arguments[1]];
     (async () => {
         try {
-            const options = {
-                method: method,
-                headers: {
-                    'Accept': 'application/json, text/plain, */*'
-                },
+            const res = await fetch(path, {
+                method: 'GET',
+                headers: { 'Accept': 'application/json, text/plain, */*' },
                 credentials: 'include'
-            };
-            if (body && method !== 'GET') {
-                options.headers['Content-Type'] = 'application/json';
-                options.body = JSON.stringify(body);
-            }
-            const res = await fetch(path, options);
+            });
             let text = await res.text();
             let parsed = null;
-            try {
-                parsed = JSON.parse(text);
-            } catch (e) {
-                parsed = text;
-            }
+            try { parsed = JSON.parse(text); } catch (e) { parsed = text; }
             callback({ ok: res.ok, status: res.status, data: parsed });
         } catch (err) {
             callback({ ok: false, status: 0, error: String(err) });
@@ -167,15 +153,14 @@ def browser_api_request(sb, path: str, method: str = "GET", body: dict = None) -
     })();
     """
     try:
-        sb.driver.set_script_timeout(20)
-        return sb.driver.execute_async_script(js, path, method, body)
+        sb.driver.set_script_timeout(15)
+        return sb.driver.execute_async_script(js, path)
     except Exception as e:
         return {"ok": False, "status": 0, "error": str(e)}
 
 
 def check_auth(sb) -> tuple[bool, str]:
-    """通过 /api/auth/me 校验登录态"""
-    res = browser_api_request(sb, "/api/auth/me", method="GET")
+    res = browser_api_get(sb, "/api/auth/me")
     if res.get("ok") and res.get("status") == 200:
         data = res.get("data") or {}
         username = data.get("username") or data.get("name") or "已登录用户"
@@ -295,12 +280,11 @@ def do_discord_login(sb, proxy_server: str = "") -> bool:
     print("↩️ 携带授权 Code 回调进入控制台...")
     sb.uc_open_with_reconnect(location, reconnect_time=4)
     sb.wait_for_ready_state_complete()
-    sb.sleep(4)
-
-    # 显式打开主控制台
-    sb.open(f"{BASE_URL}/")
-    sb.wait_for_ready_state_complete()
     sb.sleep(3)
+
+    sb.open(DASH_URL)
+    sb.wait_for_ready_state_complete()
+    sb.sleep(4)
 
     ok, who = check_auth(sb)
     if ok:
@@ -309,41 +293,112 @@ def do_discord_login(sb, proxy_server: str = "") -> bool:
     return False
 
 
-def get_items(sb, kind: str) -> list:
-    """拉取 Bot 或 Site 列表"""
+def switch_sidebar_menu(sb, target_name: str):
+    """在侧边栏中切换 Bot / Web 视图"""
+    js = f"""
+    const btns = Array.from(document.querySelectorAll('aside button, [class*="navItem"]'));
+    const btn = btns.find(b => (b.textContent || '').trim().toLowerCase().includes('{target_name.lower()}'));
+    if (btn) {{
+        btn.click();
+        return true;
+    }}
+    return false;
+    """
+    sb.execute_script(js)
+    sb.sleep(3)
+
+
+def handle_possible_dialogs_and_captcha(sb):
+    """检测并确认可能出现的确认弹窗或验证码"""
+    # 1. 检查确认弹窗
+    js_modal = """
+    const buttons = Array.from(document.querySelectorAll('.modal button, [role="dialog"] button'));
+    const confirmBtn = buttons.find(b => {
+        const t = (b.textContent || '').trim().toLowerCase();
+        return t.includes('confirm') || t.includes('renew') || t.includes('确认') || t.includes('续期') || t.includes('延長');
+    });
+    if (confirmBtn) {
+        confirmBtn.click();
+        return true;
+    }
+    return false;
+    """
+    try:
+        sb.execute_script(js_modal)
+    except Exception:
+        pass
+
+    # 2. 如果弹出 Cloudflare Turnstile，尝试点击验证
+    try:
+        if sb.is_element_present("iframe[src*='cloudflare']"):
+            sb.uc_gui_click_captcha()
+    except Exception:
+        pass
+
+
+def click_renew_button_on_ui(sb, kind: str, oid: str or int) -> bool:
+    """根据 data-zoom-id 在页面卡片中定位并点击「续期」按钮"""
+    zoom_attr = f"{kind.lower()}-{oid}"
+    js_click = f"""
+    const card = document.querySelector('[data-zoom-id="{zoom_attr}"]');
+    if (!card) return {{ success: false, reason: '未找到卡片' }};
+
+    const buttons = Array.from(card.querySelectorAll('button'));
+    const keywords = ['续期', 'renew', '延長', '延期'];
+    
+    let renewBtn = buttons.find(b => {{
+        const text = (b.textContent || '').trim().toLowerCase();
+        return keywords.some(k => text.includes(k));
+    }});
+
+    // 如果文字未命中，尝试获取第二个按钮（通常操作排布为 [启动/停止, 续期, ...]）
+    if (!renewBtn && buttons.length >= 2) {{
+        renewBtn = buttons[1];
+    }}
+
+    if (!renewBtn) return {{ success: false, reason: '未在卡片内找到续期按钮' }};
+
+    if (renewBtn.disabled || renewBtn.getAttribute('aria-disabled') === 'true') {{
+        return {{ success: false, reason: '按钮处于禁用/冷却状态' }};
+    }}
+
+    renewBtn.scrollIntoView({{ block: 'center', inline: 'nearest' }});
+    renewBtn.click();
+    return {{ success: true }};
+    """
+    try:
+        res = sb.execute_script(js_click) or {}
+        if res.get("success"):
+            sb.sleep(2)
+            handle_possible_dialogs_and_captcha(sb)
+            sb.sleep(3)
+            return True
+        else:
+            print(f"   ℹ️ 界面点击提示: {res.get('reason')}")
+            return False
+    except Exception as e:
+        print(f"   ⚠️ 点击异常: {e}")
+        return False
+
+
+def get_items_via_api(sb, kind: str) -> list:
     path = "/api/bots" if kind == "Bot" else "/api/sites"
     key = "bots" if kind == "Bot" else "sites"
-    res = browser_api_request(sb, path, method="GET")
-
+    res = browser_api_get(sb, path)
     if not res.get("ok"):
-        print(f"⚠️ 拉取 {kind} 列表失败: HTTP {res.get('status')} {res.get('error')}")
         return []
-
     data = res.get("data") or []
     items_list = data if isinstance(data, list) else data.get(key, [])
     parsed = []
     for item in items_list or []:
-        oid = item.get("id")
-        name = item.get("name") or item.get("username") or f"id:{oid}"
-        timer = item.get("timer") or {}
-        rem = timer.get("remaining_hours")
-        status = item.get("status") or "UNKNOWN"
         parsed.append({
             "kind": kind,
-            "id": oid,
-            "name": name,
-            "status": status,
-            "remaining": rem
+            "id": item.get("id"),
+            "name": item.get("name") or item.get("username") or f"id:{item.get('id')}",
+            "status": item.get("status") or "UNKNOWN",
+            "remaining": (item.get("timer") or {}).get("remaining_hours")
         })
     return parsed
-
-
-def renew_item(sb, kind: str, oid: str or int) -> tuple[bool, int, str]:
-    """通过 API 触发续期"""
-    path = f"/api/bots/{oid}/renew" if kind == "Bot" else f"/api/sites/{oid}/renew"
-    res = browser_api_request(sb, path, method="POST")
-    ok = res.get("ok", False) and (res.get("status") == 200)
-    return ok, res.get("status", 0), str(res.get("data") or res.get("error") or "")
 
 
 def main():
@@ -371,7 +426,7 @@ def main():
 
         logged_in = False
 
-        # 1. 尝试使用 MWS_COOKIES 恢复会话
+        # 1. 尝试使用现有 Cookie 免密进入控制台
         if MWS_COOKIES:
             print("🍪 检测到现有 MWS_COOKIES，尝试免密登录...")
             if inject_cookies_to_browser(sb, MWS_COOKIES):
@@ -380,9 +435,9 @@ def main():
                     logged_in = True
                     print(f"✅ 成功复用 Cookie 登录: {who}")
                 else:
-                    print("⚠️ Cookie 已失效或过期，准备使用 Discord 重新登录...")
+                    print("⚠️ Cookie 已失效，准备使用 Discord 重新登录...")
 
-        # 2. 回退至 Discord OAuth 模拟授权
+        # 2. 回退至 Discord OAuth 模拟授权登录
         if not logged_in:
             print("🔄 启动 Discord OAuth 授权登录...")
             if do_discord_login(sb, proxy_server if is_proxy else ""):
@@ -395,17 +450,22 @@ def main():
             send_telegram_message(format_notification("❌ 登录失败", error=err))
             sys.exit(1)
 
-        # 3. 登录成功，将最新的 Cookies 导出到本地文件，供 Actions 回写覆盖 Secrets
+        # 3. 登录成功后保存最新的 Cookies 供 Actions 回写覆盖 Secrets
         save_cookies_to_file(sb, "cookies.json")
 
         all_results = []
         total_count = 0
         success_count = 0
 
-        # 4. 分别查询与执行 Bot 和 Site 的续期
-        for kind in ["Bot", "Site"]:
-            items = get_items(sb, kind)
+        # 4. 扫描实例并通过画面卡片点击续期
+        for kind, menu_name in [("Bot", "Bot"), ("Site", "Web")]:
+            items = get_items_via_api(sb, kind)
             print(f"\n📋 共获取到 {len(items)} 个 {kind} 实例")
+            if not items:
+                continue
+
+            # 切换到对应的侧边栏标签页
+            switch_sidebar_menu(sb, menu_name)
 
             for it in items:
                 total_count += 1
@@ -414,26 +474,40 @@ def main():
                 rem_before = it["remaining"]
                 status = it["status"]
 
-                status_icon = "🟢" if status.lower() == "running" else "🟡"
+                status_icon = "🟢" if str(status).lower() == "running" else "🟡"
                 info = f"{status_icon} [{kind}] {name} (id:{oid}) | 剩余: {rem_before}h"
 
-                # 触发续期 API
-                ok, code, body = renew_item(sb, kind, oid)
-                if ok:
-                    success_count += 1
-                    # 重新拉取获取刷新后的时间
-                    sb.sleep(2)
-                    fresh_items = get_items(sb, kind)
-                    fresh_it = next((x for x in fresh_items if str(x["id"]) == str(oid)), None)
-                    rem_after = fresh_it["remaining"] if fresh_it else "已重置"
+                print(f"👉 正在执行 [{name}] 界面续期...")
+                clicked = click_renew_button_on_ui(sb, kind, oid)
 
+                # 刷新后通过 API 再次确认时间
+                fresh_items = get_items_via_api(sb, kind)
+                fresh_it = next((x for x in fresh_items if str(x["id"]) == str(oid)), None)
+                rem_after = fresh_it["remaining"] if fresh_it else rem_before
+
+                # 判断续期结果：剩余时间显著增加（如由 0h 变为 168h），或剩余时间充裕（>160h）且已点击完成
+                is_renewed = False
+                if rem_before is not None and rem_after is not None:
+                    if int(rem_after) > int(rem_before):
+                        is_renewed = True
+                    elif int(rem_after) >= 160 and clicked:
+                        is_renewed = True
+                elif clicked:
+                    is_renewed = True
+
+                if is_renewed:
+                    success_count += 1
                     print(f"   ✅ [{name}] 续期成功: {rem_before}h → {rem_after}h")
                     all_results.append(f"{info} → {rem_after}h\n📋 结果: ✅ 续期成功")
                 else:
-                    print(f"   ❌ [{name}] 续期失败: HTTP {code} {body}")
-                    all_results.append(f"{info}\n📋 结果: ❌ 续期失败 (HTTP {code})")
+                    if rem_before is not None and int(rem_before) >= 160:
+                        print(f"   ⏩ [{name}] 剩余时间充足 ({rem_before}h)，无需重复续期")
+                        all_results.append(f"{info}\n📋 结果: ⏩ 冷却中 (无需续期)")
+                    else:
+                        print(f"   ❌ [{name}] 续期未生效 (当前剩余: {rem_after}h)")
+                        all_results.append(f"{info}\n📋 结果: ❌ 续期未生效")
 
-        # 5. 汇总处理
+        # 5. 汇总并发送 Telegram 报告
         if total_count == 0:
             msg = "账号下未获取到任何 Bot 或 Site 实例"
             print(f"⚠️ {msg}")
@@ -443,7 +517,7 @@ def main():
             print("\n" + "=" * 35)
             print(summary)
             print("=" * 35)
-            status_text = "✅ 全部续期完成" if success_count == total_count else f"⚠️ 完成 ({success_count}/{total_count})"
+            status_text = "✅ 自动续期完成" if success_count > 0 or all("冷却中" in r for r in all_results) else "⚠️ 执行完毕（部分未生效）"
             send_telegram_message(format_notification(status_text, extra=summary))
 
     print("🏁 任务结束")

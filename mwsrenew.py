@@ -180,7 +180,7 @@ def browser_api_get(sb, path: str) -> dict:
             });
             let text = await res.text();
             let parsed = null;
-            try { parsed = JSON.parse(text); } catch (e) {}
+            try { parsed = JSON.parse(text); } catch (e) { parsed = text; }
             callback({ ok: res.ok, status: res.status, data: parsed });
         } catch (err) {
             callback({ ok: false, status: 0, error: String(err) });
@@ -343,70 +343,99 @@ def switch_sidebar_menu(sb, target_name: str):
     sb.sleep(3)
 
 
-def handle_possible_dialogs_and_captcha(sb, max_wait: int = 10):
-    """循环检测并处理弹出的 Cloudflare Turnstile 验证码及确认对话框"""
-    for _ in range(max_wait):
+def solve_turnstile_modal(sb, timeout: int = 15) -> bool:
+    """针对弹窗中的 Cloudflare Turnstile 执行精准 CDP 物理坐标穿透点击"""
+    start_time = time.time()
+    clicked_once = False
+
+    while time.time() - start_time < timeout:
         sb.sleep(1)
-        
-        # 1. 尝试检测并解决 Turnstile 人机验证
-        try:
-            if sb.is_element_present("iframe[src*='challenges.cloudflare.com']") or sb.is_element_present("iframe[src*='turnstile']"):
-                print("   🛡️ 检测到 Cloudflare Turnstile 人机验证，正在自动穿透解决...")
-                try:
-                    sb.click_turnstile_if_present()
-                except Exception:
-                    pass
-                sb.sleep(2)
-        except Exception:
-            pass
 
-        # 2. 检测全屏或浮层中的确认按钮
-        js_modal = """
-        const candidates = Array.from(document.querySelectorAll('button')).filter(b => {
-            let el = b;
-            let isOverlay = false;
-            while (el && el !== document.body) {
-                const st = window.getComputedStyle(el);
-                if (st.position === 'fixed' || st.position === 'absolute' || parseInt(st.zIndex || '0') > 10) {
-                    isOverlay = true;
-                    break;
-                }
-                el = el.parentElement;
+        # 1. 检查弹窗是否存在
+        modal_info = sb.execute_script("""
+            const modal = document.querySelector('div[style*="z-index: 10000"]') ||
+                          Array.from(document.querySelectorAll('div')).find(d => (d.textContent || '').includes('確認しています'));
+            if (!modal) return null;
+
+            // 获取内部卡片容器
+            const card = modal.querySelector('div[style*="border-radius"]') || modal.children[0];
+            if (!card) return null;
+
+            // 获取 Turnstile 容器（位于标题与取消按钮之间）
+            const cancelBtn = Array.from(card.querySelectorAll('button')).find(b => (b.textContent || '').includes('キャンセル'));
+            const wrapper = cancelBtn ? cancelBtn.previousElementSibling : card.children[1];
+
+            let targetRect = null;
+            if (wrapper) {
+                const r = wrapper.getBoundingClientRect();
+                targetRect = { left: r.left, top: r.top, width: r.width, height: r.height };
             }
-            return isOverlay;
-        });
 
-        const keywords = ['confirm', 'renew', 'start', '确认', '确定', '续期', '启动', '延長', 'はい', 'ok'];
-        const confirmBtn = candidates.find(b => {
-            const t = (b.textContent || '').trim().toLowerCase();
-            return keywords.some(k => t.includes(k));
-        });
+            const tokenInput = modal.querySelector('input[name="cf-turnstile-response"]');
+            const token = tokenInput ? tokenInput.value : '';
 
-        if (confirmBtn) {
-            confirmBtn.click();
-            return true;
-        }
-        return false;
-        """
-        try:
-            if sb.execute_script(js_modal):
-                print("   👉 已确认弹层对话框")
-                sb.sleep(2)
-                break
-        except Exception:
-            pass
+            return {
+                hasModal: true,
+                rect: targetRect,
+                token: token
+            };
+        """)
 
-        # 检查是否已有 /renew 相关的网络响应返回
+        # 弹窗已自然关闭，说明验证完成并提交成功
+        if not modal_info:
+            if clicked_once:
+                print("   ✅ Turnstile 验证弹窗已自动关闭，请求已发出")
+                return True
+            continue
+
+        # 检查是否已生成 Token
+        if modal_info.get("token"):
+            print("   ✅ 成功获取 Turnstile Token，等待网站后端处理...")
+            sb.sleep(2)
+            return True
+
+        # 2. 如果弹窗出现且尚未点击，计算坐标并派发 CDP 原生物理点击
+        rect = modal_info.get("rect")
+        if rect and not clicked_once:
+            print("   🛡️ 检测到 Turnstile 验证弹窗 [確認しています…]，正在计算物理坐标...")
+            # 复选框固定在 widget 左侧 ~32px，垂直居中位置
+            click_x = int(rect["left"] + 32)
+            click_y = int(rect["top"] + rect["height"] / 2)
+            print(f"   🎯 派发 CDP 物理点击 -> ({click_x}, {click_y})")
+
+            try:
+                # 派发硬件级鼠标按下与抬起事件（生成 isTrusted: true）
+                sb.driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+                    "type": "mousePressed",
+                    "x": click_x,
+                    "y": click_y,
+                    "button": "left",
+                    "clickCount": 1
+                })
+                time.sleep(0.1)
+                sb.driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+                    "type": "mouseReleased",
+                    "x": click_x,
+                    "y": click_y,
+                    "button": "left",
+                    "clickCount": 1
+                })
+                clicked_once = True
+            except Exception as e:
+                print(f"   ⚠️ CDP 点击异常: {e}")
+
+        # 打印捕获到的相关请求
         logs = get_latest_network_logs(sb)
-        has_renew_req = any("/renew" in l.get("url", "") for l in logs)
-        if has_renew_req:
-            for log in logs:
+        for log in logs:
+            if "/renew" in log.get("url", "") or "/start" in log.get("url", ""):
                 print(f"      🌐 [API] {log.get('method')} {log.get('url')} -> HTTP {log.get('status')} | {log.get('body')}")
-            break
+                return True
+
+    return False
 
 
 def execute_card_button_click(sb, card_sel: str, btn_keywords: list, action_name: str) -> bool:
-    """定位按钮，等待禁用态解除，并派发真实完整的点击事件"""
+    """在卡片内定位按钮，等待可用后派发原生点击，随后处理 Turnstile 弹窗"""
     try:
         if not sb.is_element_present(card_sel):
             print(f"   ⚠️ 未定位到卡片: {card_sel}")
@@ -415,7 +444,7 @@ def execute_card_button_click(sb, card_sel: str, btn_keywords: list, action_name
         sb.scroll_to_element(card_sel)
         sb.sleep(1)
 
-        # 等待按钮处于可用状态（最多等 10 秒，避免开机过渡期 disabled）
+        # 动态重搜按钮并等待 disabled 解除
         target_btn = None
         for _ in range(10):
             buttons = sb.find_elements(f"{card_sel} button")
@@ -437,10 +466,9 @@ def execute_card_button_click(sb, card_sel: str, btn_keywords: list, action_name
             return False
 
         btn_txt = (target_btn.text or "").strip()
-        is_disabled = target_btn.get_attribute("disabled") is not None
-        print(f"   🎯 选定目标按钮: [{btn_txt}] (disabled: {is_disabled})")
+        print(f"   🎯 点击卡片按钮: [{btn_txt}]")
 
-        # 触发完整鼠标事件序列，确保触发 React / Next.js 的合成事件监听
+        # 派发物理事件序列
         js_dispatch_click = """
         const btn = arguments[0];
         btn.scrollIntoView({ block: 'center' });
@@ -458,8 +486,9 @@ def execute_card_button_click(sb, card_sel: str, btn_keywords: list, action_name
         except Exception:
             sb.execute_script(js_dispatch_click, target_btn)
 
-        print(f"   👉 已触发「{action_name}」按钮指令，等待响应与人机验证...")
-        handle_possible_dialogs_and_captcha(sb, max_wait=8)
+        print(f"   👉 已触发「{action_name}」按钮指令，检测弹窗与人机验证...")
+        # 核心：调用 CDP 穿透处理 Turnstile 弹窗
+        solve_turnstile_modal(sb, timeout=12)
         return True
     except Exception as e:
         print(f"   ❌ 点击「{action_name}」失败: {e}")
@@ -575,20 +604,10 @@ def main():
                     all_results.append(f"{info}\n📋 结果: ⚠️ 未定位到卡片")
                     continue
 
-                sb.scroll_to_element(card_sel)
-                sb.sleep(1)
-
-                # 1. 若处于停机状态，先点「启动」
-                if is_stopped:
-                    print("   ⚡ 检测到实例处于 STOPPED 状态，先执行「启动」...")
-                    execute_card_button_click(sb, card_sel, ["启动", "start"], "启动")
-                    print("   ⏳ 等待容器初始化并就绪 (8秒)...")
-                    sb.sleep(8)
-
-                # 2. 执行「续期」点击
+                # 步骤 1：直接点击「续期」触发 Turnstile 弹窗
                 execute_card_button_click(sb, card_sel, ["续期", "renew", "延長"], "续期")
 
-                # 3. 轮询等待后端数据库同步与倒计时重置
+                # 步骤 2：轮询等待后端数据库同步
                 is_renewed = False
                 rem_after = rem_before
                 for _ in range(4):
@@ -601,6 +620,12 @@ def main():
                             if int(rem_after) > int(rem_before) or int(rem_after) >= 160:
                                 is_renewed = True
                                 break
+
+                # 步骤 3：若原本处于 STOPPED 状态，在续期成功后拉起服务
+                if is_stopped:
+                    print("   ⚡ 正在拉起实例服务...")
+                    execute_card_button_click(sb, card_sel, ["启动", "start"], "启动")
+                    sb.sleep(5)
 
                 fresh_items = get_items_via_api(sb, kind)
                 final_it = next((x for x in fresh_items if str(x["id"]) == str(oid)), None)

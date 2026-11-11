@@ -132,6 +132,42 @@ def save_cookies_to_file(sb, filepath: str = "cookies.json"):
     return False
 
 
+def setup_network_interceptor(sb):
+    """注入网络监听钩子，实时捕获页面发出的所有 API 请求与返回结果"""
+    js = """
+    window.__net_logs = [];
+    const origFetch = window.fetch;
+    window.fetch = async (...args) => {
+        const url = String(args[0]);
+        const opts = args[1] || {};
+        const method = (opts.method || 'GET').toUpperCase();
+        try {
+            const resp = await origFetch(...args);
+            const clone = resp.clone();
+            let body = '';
+            try { body = await clone.text(); } catch (e) {}
+            window.__net_logs.push({ url, method, status: resp.status, body: body.substring(0, 300) });
+            return resp;
+        } catch (err) {
+            window.__net_logs.push({ url, method, status: 0, error: String(err) });
+            throw err;
+        }
+    };
+    """
+    try:
+        sb.execute_script(js)
+    except Exception:
+        pass
+
+
+def get_latest_network_logs(sb) -> list:
+    js = "const logs = window.__net_logs || []; window.__net_logs = []; return logs;"
+    try:
+        return sb.execute_script(js) or []
+    except Exception:
+        return []
+
+
 def browser_api_get(sb, path: str) -> dict:
     js = """
     const [path, callback] = [arguments[0], arguments[1]];
@@ -310,6 +346,7 @@ def switch_sidebar_menu(sb, target_name: str):
 def handle_possible_dialogs_and_captcha(sb):
     """检测并确认可能弹出的确认对话框或 Turnstile 人机验证"""
     sb.sleep(1)
+    # 1. 尝试检测并点击 Turnstile
     try:
         if sb.is_element_present("iframe[src*='challenges.cloudflare.com']") or sb.is_element_present("iframe[src*='turnstile']"):
             print("   🛡️ 检测到 Cloudflare Turnstile 验证，尝试自动解决...")
@@ -317,16 +354,33 @@ def handle_possible_dialogs_and_captcha(sb):
                 sb.click_turnstile_if_present()
             except Exception:
                 pass
-            sb.sleep(2)
+            sb.sleep(3)
     except Exception:
         pass
 
+    # 2. 检测全屏或浮层中的确认按钮
     js_modal = """
-    const buttons = Array.from(document.querySelectorAll('.modal button, [role="dialog"] button, div[class*="modal"] button'));
-    const confirmBtn = buttons.find(b => {
-        const t = (b.textContent || '').trim().toLowerCase();
-        return t.includes('confirm') || t.includes('renew') || t.includes('确认') || t.includes('确定') || t.includes('续期') || t.includes('延長');
+    // 扫描所有可见且处于较高层级的弹窗按钮
+    const candidates = Array.from(document.querySelectorAll('button')).filter(b => {
+        let el = b;
+        let isOverlay = false;
+        while (el && el !== document.body) {
+            const st = window.getComputedStyle(el);
+            if (st.position === 'fixed' || st.position === 'absolute' || parseInt(st.zIndex || '0') > 10) {
+                isOverlay = true;
+                break;
+            }
+            el = el.parentElement;
+        }
+        return isOverlay;
     });
+
+    const keywords = ['confirm', 'renew', 'start', '确认', '确定', '续期', '启动', '延長', 'はい', 'ok'];
+    const confirmBtn = candidates.find(b => {
+        const t = (b.textContent || '').trim().toLowerCase();
+        return keywords.some(k => t.includes(k));
+    });
+
     if (confirmBtn) {
         confirmBtn.click();
         return true;
@@ -335,76 +389,44 @@ def handle_possible_dialogs_and_captcha(sb):
     """
     try:
         if sb.execute_script(js_modal):
-            print("   👉 已确认弹窗对话框")
+            print("   👉 已确认弹层对话框")
             sb.sleep(2)
     except Exception:
         pass
 
 
-def execute_renew(sb, kind: str, oid: str or int) -> bool:
-    """第一步：只执行续期点击"""
-    zoom_attr = f"{kind.lower()}-{oid}"
-    card_sel = f'[data-zoom-id="{zoom_attr}"]'
-
-    if not sb.is_element_present(card_sel):
-        print(f"   ⚠️ 未找到卡片: {card_sel}")
-        return False
-
-    sb.scroll_to(card_sel)
-    sb.sleep(1)
-
-    renew_selectors = [
-        f'{card_sel} button:contains("续期")',
-        f'{card_sel} button:contains("Renew")',
-        f'{card_sel} button:contains("延長")',
-    ]
-    target_btn = None
-    for sel in renew_selectors:
-        if sb.is_element_present(sel):
-            target_btn = sel
-            break
-
-    if not target_btn:
-        try:
-            buttons = sb.find_elements(f"{card_sel} button")
-            if len(buttons) >= 2:
-                target_btn = buttons[1]
-        except Exception:
-            pass
-
-    if not target_btn:
-        print("   ⚠️ 未在卡片内定位到续期按钮")
-        return False
-
+def execute_card_button_click(sb, card_sel: str, btn_keywords: list, action_name: str) -> bool:
+    """在指定卡片内定位包含特定关键词的按钮并物理派发点击"""
     try:
-        sb.click(target_btn)
-        print("   👉 已派发原生物理点击指令（续期）")
+        buttons = sb.find_elements(f"{card_sel} button")
+        target_btn = None
+        for b in buttons:
+            txt = (b.text or "").strip().lower()
+            if any(k.lower() in txt for k in btn_keywords):
+                target_btn = b
+                break
+
+        if not target_btn and len(buttons) >= 2 and "续期" in btn_keywords:
+            target_btn = buttons[1]
+
+        if not target_btn:
+            print(f"   ⚠️ 未在卡片内定位到「{action_name}」按钮")
+            return False
+
+        target_btn.click()
+        print(f"   👉 已触发「{action_name}」按钮指令")
+        sb.sleep(2)
         handle_possible_dialogs_and_captcha(sb)
+
+        # 打印点击后产生的网络请求细节
+        logs = get_latest_network_logs(sb)
+        for log in logs:
+            if "/api/" in log.get("url", ""):
+                print(f"      🌐 [API] {log.get('method')} {log.get('url')} -> HTTP {log.get('status')} | {log.get('body')}")
         return True
     except Exception as e:
-        print(f"   ❌ 续期点击失败: {e}")
+        print(f"   ❌ 点击「{action_name}」失败: {e}")
         return False
-
-
-def execute_start(sb, kind: str, oid: str or int):
-    """第二步：续期生效后，若原先为停机状态则拉起服务"""
-    zoom_attr = f"{kind.lower()}-{oid}"
-    card_sel = f'[data-zoom-id="{zoom_attr}"]'
-    start_selectors = [
-        f'{card_sel} button:contains("启动")',
-        f'{card_sel} button:contains("Start")',
-    ]
-    for sel in start_selectors:
-        if sb.is_element_present(sel):
-            print("   ⚡ 续期完成，正在启动实例...")
-            try:
-                sb.click(sel)
-                sb.sleep(3)
-                handle_possible_dialogs_and_captcha(sb)
-                print("   ✅ 已触发启动指令")
-            except Exception as e:
-                print(f"   ⚠️ 启动操作异常: {e}")
-            break
 
 
 def get_items_via_api(sb, kind: str) -> list:
@@ -474,6 +496,8 @@ def main():
             send_telegram_message(format_notification("❌ 登录失败", error=err))
             sys.exit(1)
 
+        # 挂载网络请求拦截器，实时追踪页面调用的所有 API
+        setup_network_interceptor(sb)
         save_cookies_to_file(sb, "cookies.json")
 
         all_results = []
@@ -499,17 +523,35 @@ def main():
                 status_icon = "🟢" if status == "RUNNING" else "🔴"
                 info = f"{status_icon} [{kind}] {name} (id:{oid}) | 剩余: {rem_before}h"
 
-                # 剩余时间充裕且仍在运行中
+                # 运行中且剩余时间充裕（>=166h）
                 if rem_before is not None and int(rem_before) >= 166 and not is_stopped:
                     print(f"   ⏩ [{name}] 剩余时间充足 ({rem_before}h)，无需重复操作")
                     all_results.append(f"{info}\n📋 结果: ⏩ 冷却中 (无需续期)")
                     success_count += 1
                     continue
 
-                print(f"👉 正在对 [{name}] 执行续期操作 (当前: {rem_before}h, 状态: {status})...")
-                execute_renew(sb, kind, oid)
+                print(f"👉 正在处理 [{name}] (当前状态: {status}, 剩余: {rem_before}h)...")
+                zoom_attr = f"{kind.lower()}-{oid}"
+                card_sel = f'[data-zoom-id="{zoom_attr}"]'
 
-                # 轮询等待后端数据库同步更新（最多等 10 秒）
+                if not sb.is_element_present(card_sel):
+                    print(f"   ⚠️ 未定位到卡片元素: {card_sel}")
+                    all_results.append(f"{info}\n📋 结果: ⚠️ 未定位到卡片")
+                    continue
+
+                sb.scroll_to(card_sel)
+                sb.sleep(1)
+
+                # 核心机制：若处于停机或 0h 状态，先点击启动唤醒容器
+                if is_stopped:
+                    print("   ⚡ 检测到实例处于 STOPPED / 0h 状态，先执行「启动」...")
+                    execute_card_button_click(sb, card_sel, ["启动", "start"], "启动")
+                    sb.sleep(5)
+
+                # 执行「续期」点击重置倒计时
+                execute_card_button_click(sb, card_sel, ["续期", "renew", "延長"], "续期")
+
+                # 等待后端异步写入
                 is_renewed = False
                 rem_after = rem_before
                 for _ in range(3):
@@ -523,22 +565,25 @@ def main():
                                 is_renewed = True
                                 break
 
-                # 续期成功后，若原本已停机，则唤醒启动
-                if is_renewed and is_stopped:
-                    execute_start(sb, kind, oid)
-                    sb.sleep(3)
-
+                # 若成功续期后状态仍为 STOPPED，再次尝试启动拉起服务
                 fresh_items = get_items_via_api(sb, kind)
                 final_it = next((x for x in fresh_items if str(x["id"]) == str(oid)), None)
                 final_status = str(final_it["status"]).upper() if final_it else status
                 final_rem = final_it["remaining"] if final_it else rem_after
 
-                if is_renewed:
+                if is_renewed and final_status == "STOPPED":
+                    execute_card_button_click(sb, card_sel, ["启动", "start"], "启动拉起")
+                    sb.sleep(3)
+                    fresh_items = get_items_via_api(sb, kind)
+                    final_it = next((x for x in fresh_items if str(x["id"]) == str(oid)), None)
+                    final_status = str(final_it["status"]).upper() if final_it else final_status
+
+                if is_renewed or (final_rem is not None and int(final_rem) >= 160):
                     success_count += 1
-                    print(f"   ✅ [{name}] 续期成功: {rem_before}h → {final_rem}h ({final_status})")
+                    print(f"   ✅ [{name}] 处理完成: {rem_before}h → {final_rem}h [{final_status}]")
                     all_results.append(f"{info} → {final_rem}h [{final_status}]\n📋 结果: ✅ 续期成功")
                 else:
-                    print(f"   ❌ [{name}] 续期未生效 (当前: {final_rem}h, {final_status})")
+                    print(f"   ❌ [{name}] 续期未生效 (当前: {final_rem}h [{final_status}])")
                     all_results.append(f"{info} → {final_rem}h [{final_status}]\n📋 结果: ❌ 续期未生效")
 
         if total_count == 0:
